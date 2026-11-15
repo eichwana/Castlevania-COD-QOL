@@ -148,6 +148,23 @@ VOut main(float2 p : POSITION, uint prim : PRIM) {
 
 // What both drawing paths share: the primitive's state and attribute planes, texturing.
 inline constexpr const char* kDrawShared = R"(
+// Variants of the hardware path's pixel shader (GsGpu::Impl::fastVariant), each without the code
+// its runs never reach, which costs registers and so speed at every pixel: SPEC_TEX 0 untextured,
+// 1-3 a texture on a surface of that kind (texFromSurface), 4 one from GS memory, 5 any (the
+// shader everything else uses); SPEC_DEST 0 never the destination read from a copy.
+#ifndef SPEC_TEX
+#define SPEC_TEX 5
+#endif
+#ifndef SPEC_DEST
+#define SPEC_DEST 1
+#endif
+#if SPEC_TEX >= 1 && SPEC_TEX <= 3
+#define TEXSRC SPEC_TEX
+#elif SPEC_TEX == 4
+#define TEXSRC 0
+#else
+#define TEXSRC texFromSurface
+#endif
 struct Prim {
   uint flags, fbp, fbw, fpsm, fbmsk, zbp, zpsm, zmax, ztst, atst, afail;
   int aref;
@@ -217,13 +234,19 @@ uint fetchTexel(Prim p, int u, int v) {
   uint y = uint(wrapCoord(v, p.th, p.wmt, p.minv, p.maxv));
   uint base = p.clutSlot * 256;
 #ifdef SURFACE_TEXTURE
-  if (texFromSurface == 2) {  // a count surface: its channels are the 16-bit texel's, wrapped
+  if (TEXSRC == 2) {  // a count surface: its channels are the 16-bit texel's, wrapped
     const uint4 n = uint4(int4(round(texSurface.Load(int3(x * SCALE + gLayer % SCALE, y * SCALE + gLayer / SCALE, 0)))) & int4(31, 31, 31, 1));
     const uint raw = n.r | (n.g << 5) | (n.b << 10) | (n.a << 15);
     const uint alpha = (raw & 0x8000) ? p.ta1 : (((p.flags & F_AEM) && (raw & 0x7FFF) == 0) ? 0u : p.ta0);
     return (from16(raw) & 0xFFFFFF) | (alpha << 24);
   }
-  if (texFromSurface != 0 && (p.tpsm == PSMCT32 || p.tpsm == PSMCT24)) {  // the sample of the texel's layer
+  if (TEXSRC == 3) {  // a 16-bit colour surface: its sample as memory would hold it (5 bits a channel)
+    const uint4 c = uint4(saturate(texSurface.Load(int3(x * SCALE + gLayer % SCALE, y * SCALE + gLayer / SCALE, 0))) * 255.0 + 0.5);
+    const uint raw = to16(c.r | (c.g << 8) | (c.b << 16) | (c.a << 24));
+    const uint alpha = (raw & 0x8000) ? p.ta1 : (((p.flags & F_AEM) && (raw & 0x7FFF) == 0) ? 0u : p.ta0);
+    return (from16(raw) & 0xFFFFFF) | (alpha << 24);
+  }
+  if (TEXSRC != 0 && (SPEC_TEX == 1 || p.tpsm == PSMCT32 || p.tpsm == PSMCT24)) {  // the sample of the texel's layer
     uint4 c = uint4(saturate(texSurface.Load(int3(x * SCALE + gLayer % SCALE, y * SCALE + gLayer / SCALE, 0))) * 255.0 + 0.5);
     uint raw = c.r | (c.g << 8) | (c.b << 16) | (c.a << 24);
     if (p.tpsm == PSMCT32) return raw;
@@ -231,6 +254,9 @@ uint fetchTexel(Prim p, int u, int v) {
     return raw | (((p.flags & F_AEM) && raw == 0) ? 0u : p.ta0 << 24);
   }
 #endif
+#if SPEC_TEX >= 1 && SPEC_TEX <= 3
+  return 0;
+#else
   switch (p.tpsm) {
     case PSMCT32: return load32(addr32(p.tbp, p.tbw, x, y, false));
     case PSMCT24: {
@@ -249,6 +275,7 @@ uint fetchTexel(Prim p, int u, int v) {
     case PSMT4HH: return cluts[base + ((p.csa + (load32(addr32(p.tbp, p.tbw, x, y, false)) >> 28)) & 0xFF)];
   }
   return 0;
+#endif
 }
 
 int floorDiv(int a, int b) { return (a >= 0 ? a : a - b + 1) / b; }
@@ -270,7 +297,7 @@ uint fetchSample(Prim p, int au, int av, int grid) {
 int4 filteredTexel(Prim p, float fu, float fv, uint layer) {
   int grid = 1;
 #ifdef SURFACE_TEXTURE
-  if (texFromSurface == 2 || (texFromSurface != 0 && (p.tpsm == PSMCT32 || p.tpsm == PSMCT24))) grid = SCALE;
+  if (TEXSRC >= 2 || (TEXSRC != 0 && (SPEC_TEX == 1 || p.tpsm == PSMCT32 || p.tpsm == PSMCT24))) grid = SCALE;
 #endif
   const float cu = (fu - 0.5) * float(grid), cv = (fv - 0.5) * float(grid);
   const int au = floorToInt(cu * 16.0), av = floorToInt(cv * 16.0);
@@ -335,7 +362,7 @@ uint depthAt(Prim p, float rx, float ry) {
 int4 shadeWith(Prim p, int4 c, float s, float t, float q, float u, float v, float fog, uint layer) {
   uint fl = p.flags;
   int r = c.r, g = c.g, b = c.b, a = c.a;
-  if (fl & F_TME) {
+  if (SPEC_TEX != 0 && (fl & F_TME)) {
     int tu, tv, su, sv;  // the texel, and which of its sub-texels (the texture's layer)
     float tx, ty;        // the coordinate, in texels
     if (fl & F_FST) {
@@ -355,7 +382,7 @@ int4 shadeWith(Prim p, int4 c, float s, float t, float q, float u, float v, floa
     if (fl & F_LINEAR) {
       int4 tf;
 #ifdef CACHED_TEXTURES
-      if (fl & F_CACHED)  // the GPU's filter samples half a texel back too (not in the region modes)
+      if ((SPEC_TEX == 4 || SPEC_TEX == 5) && (fl & F_CACHED))  // the GPU's filter samples half a texel back too (not in the region modes)
         tf = p.wms > 1 || p.wmt > 1 ? cachedRegionTexel(p, tx, ty)
                                     : int4(round(cachedTex.SampleGrad(cachedSampler, float2(tx / float(p.tw), ty / float(p.th)), gGradX, gGradY) * 255.0));
       else
@@ -608,7 +635,7 @@ Out main(POSITION_INPUT, noperspective float4 colour : COLOUR,
 #if EXPORT_DEPTH
   o.depth = min(floor(pos.z / zScale + 1e-3), float(p.zmax)) * zScale;  // as the GS, clamped to what the buffer holds
 #endif
-  if (destRead) {
+  if (SPEC_DEST && destRead) {
     const int4 d = int4(saturate(destCopy.Load(int3(sxs, sys, 0))) * 255.0 + 0.5);
     if ((p.flags & F_DATE) && ((d.a >> 7) != 0) != ((p.flags & F_DATM) != 0)) discard;
     if (!(p.flags & F_BLEND)) {

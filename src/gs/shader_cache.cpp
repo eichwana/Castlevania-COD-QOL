@@ -126,7 +126,11 @@ bool writeShaderCache(const std::filesystem::path& file, std::string& error) {
     gRecording = &recorded;
   }
   bool ok = true;
-  for (uint32_t scale = 1; scale <= 6 && ok; ++scale) ok = GsGpu::create(nullptr, scale, error) != nullptr;
+  for (uint32_t scale = 1; scale <= 6 && ok; ++scale) {
+    const std::unique_ptr<GsGpu> gpu = GsGpu::create(nullptr, scale, error);
+    ok = gpu != nullptr;
+    if (ok) gpu->compileAllShaders();
+  }
   if (ok) {
     ComPtr<ID3D11Device> dev;
     ComPtr<ID3D11DeviceContext> ctx;

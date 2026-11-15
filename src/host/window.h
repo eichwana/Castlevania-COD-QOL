@@ -68,7 +68,10 @@ void settingsChanged();
 // pictures shown for each of the game's (more with interpolation).
 std::string fpsText(double shownEach = 1);
 int windowClientHeight();  // the game window's inside, in pixels (any thread)
-void showWarning(const wchar_t* text);  // a message box with the game's name, before the window opens
+void showWarning(const wchar_t* text);
+// Answers the messages other threads sent this one (only those: what is posted and the input stay
+// queued), and so shows Windows the window is alive, for waits on the window's thread (setWhileWaiting).
+void answerSentMessages();  // a message box with the game's name, before the window opens
 // Photo mode (F6): the game frozen without its HUD or the port's overlays; the wheel (or +/-)
 // zooms, the arrows or W/A/S/D (or dragging with the left button) move around, F12 saves.
 struct PhotoView {

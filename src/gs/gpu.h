@@ -25,6 +25,7 @@ public:
   // pictures in the window are that much sharper, read-backs stay at the GS's resolution.
   static std::unique_ptr<GsGpu> create(void* window, uint32_t scale, std::string& error);
   ~GsGpu();
+  void compileAllShaders();  // the ones otherwise compiled when first needed (for --shader-cache)
 
   void draw(const std::vector<Gs::Command>& commands);  // one batch, in order
   // Host -> local transfer of `data` (64-bit words) and local -> local copy, as the registers say.

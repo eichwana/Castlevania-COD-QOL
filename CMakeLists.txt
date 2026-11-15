@@ -55,6 +55,7 @@ set(SOURCES
   src/host/screenshot.cpp
   src/host/update_check.cpp
   src/host/overlay.cpp
+  src/host/hang_report.cpp
   src/host/discord.cpp
   src/host/pcsx2_saves.cpp
   src/game/attack_turn.cpp

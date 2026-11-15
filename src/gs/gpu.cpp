@@ -263,6 +263,13 @@ struct GsGpu::Impl {
   std::array<double, 120> delays{};  // ... of the latest pictures
   double refreshHz = 60;
   uint64_t presents = 0;
+  // The game's pace in real time (seconds a VBlank, smoothed). Interpolation that leaves the game
+  // slower than 45 VBlanks a second for two seconds (the graphics card cannot make the pictures in
+  // between at this resolution: 6x on a GTX 1060 went under 10) is left off from then on, until the
+  // resolution changes: the game stuttered to a halt and Windows took it for hung.
+  double paceSeconds = 1 / 59.94;
+  int slowFrames = 0;
+  bool interpolationTooSlow = false;
   std::string fps;  // the counter's text, from the game's last picture
   FrameGen::View view;  // the camera's in the next picture (setView)
   bool playing = false;  // the game is being played in it (setView)
@@ -272,12 +279,25 @@ struct GsGpu::Impl {
   ComPtr<ID3D11BlendState> overBlend;  // the counter's box over the picture
   ComPtr<ID3D11SamplerState> pointSampler, linearSampler;
   ComPtr<ID3D11Buffer> constants;  // 256 bytes
-  ComPtr<ID3D11Buffer> texSource[3];  // the hardware path's TexSource: textures from memory, a surface, a count surface
+  // The hardware path's TexSource: textures from memory, a surface, a count surface, a 16-bit colour surface.
+  ComPtr<ID3D11Buffer> texSource[4];
 
   // The hardware path: frame and depth buffers as GPU textures ("surfaces"), drawn with the GPU's
   // own depth test and blending; GS memory stays the reference copy, kept in step page by page
   // (a GS page is 8 KB: 64 x 32 pixels of a 32-bit buffer).
   ComPtr<ID3D11PixelShader> fastPs, fastDepthPs, memToDepthPs;  // fastDepthPs: exports depth, for 24 and 32-bit depth
+  // Variants of them without the code a run never reaches (SPEC_TEX and SPEC_DEST in kDrawShared),
+  // which drew the heavy full-screen effects at 6x three times as fast: each compiled in the
+  // background when first needed, the general shader drawing meanwhile (the same pixels).
+  std::string variantHead, variantBody;
+  struct Variant {
+    ComPtr<ID3D11PixelShader> ps;
+    std::atomic<bool> ready{false}, asked{false};
+  };
+  static constexpr size_t kVariants = 2 * 5 * 2;  // exports depth, texture (SPEC_TEX 0-4), destination read
+  std::array<Variant, kVariants> variants;
+  void compileVariant(size_t i);
+  ID3D11PixelShader* fastVariant(bool exportDepth, uint32_t tex, bool dest);
   ComPtr<ID3D11VertexShader> fastVs;
   ComPtr<ID3D11InputLayout> fastLayout;
   ComPtr<ID3D11ComputeShader> surfaceToMemCs, memToSurfaceCs, memToCountCs;
@@ -296,12 +316,34 @@ struct GsGpu::Impl {
     uint64_t lastUsed = 0;  // drawBatches when a draw last went into it
   };
   uint64_t drawBatches = 0;
+  // Why surfaces went to memory (CODPORT_GPU_STATS): pages flushed per reason.
+  const char* flushReason = "other";
+  std::map<std::string, uint64_t> flushedPages;
+  std::map<std::string, uint64_t> slowDrawsWhy;
+  std::map<std::string, uint64_t> slowArea;  // (CODPORT_GPU_STATS) primitives on GS memory, by reason
+  std::string slowReason(const Gs::Command& c) const {
+    const Gs::Draw& d = c.d;
+    if (d.selfRead) return "depth and frame overlap";
+    if (d.ztest && d.zpsm != PSMZ32 && d.zpsm != PSMZ24 && d.zpsm != PSMZ16 && d.zpsm != PSMZ16S) return "depth format";
+    if (!counting(d) && d.fb16 && d.fbmsk != 0) return "16-bit frame masked";
+    if (!counting(d) && d.fb16 && d.blend && !weightedBlend(d)) return std::format("16-bit blend {}{}{}{}", d.ba, d.bb, d.bc, d.bd);
+    if (!counting(d) && !d.fb16 && d.fpsm != PSMCT32 && d.fpsm != PSMCT24) return std::format("frame psm {:02X}", d.fpsm);
+    if (!counting(d) && !d.fb16 && d.fbmsk != 0 && d.fbmsk != 0xFF000000u && d.fbmsk != 0x00FFFFFFu) return std::format("mask {:08X}", d.fbmsk);
+    if (!counting(d) && !d.fb16 && !exactBlend(d) && !fastBlend(d, nullptr)) return std::format("blend {}{}{}{} fix {}", d.ba, d.bb, d.bc, d.bd, d.fix);
+    if (d.blend && d.bc == 1 && !readsDestination(c)) return "C = the destination's alpha";
+    if (d.tme && d.texFeedback) return "reads where it draws";
+    if (d.tme && d.blend) return std::format("inexact blend {}{}{}{} of a drawn picture", d.ba, d.bb, d.bc, d.bd);
+    if (d.date) return "destination alpha test";
+    if (d.blend && (d.bc == 1 || d.fb16)) return std::format("blend {}{}{}{} (C = Cd or 16-bit)", d.ba, d.bb, d.bc, d.bd);
+    return "other";
+  }
   // Surfaces that hold no page any more (what they drew is in memory or in another surface) and
   // were not drawn into for a while give their textures back: the game draws its effects into
   // many buffers a page apart, each a whole surface at the drawing resolution, which at 6x came to
   // gigabytes. A surface that still holds a page keeps everything, so no detail is lost.
   static constexpr uint64_t kIdleBatches = 600;  // about half a second of drawing
   void releaseIdle();
+  static uint32_t sourceKind(const Surface& sf) { return sf.count ? 2 : sf.psm == PSMCT16 || sf.psm == PSMCT16S ? 3 : 1; }  // of TexSource
   // What a surface holds now in these GS pixels, for a draw into it to read.
   ID3D11ShaderResourceView* snapshot(Surface& sf, int x0, int y0, int x1, int y1);
   ComPtr<ID3D11BlendState> floorBlend;  // MAX of the result and the shader's 0
@@ -385,7 +427,7 @@ struct GsGpu::Impl {
   }
   std::map<uint32_t, ComPtr<ID3D11BlendState>> blendStates;
   std::map<uint32_t, ComPtr<ID3D11DepthStencilState>> depthStates;
-  uint64_t fastDraws = 0, slowDraws = 0, syncs = 0, lowResRuns = 0;
+  uint64_t fastDraws = 0, slowDraws = 0, syncs = 0, lowResRuns = 0, clearedRuns = 0;
   // The graphics card's working time (with a window, or CODPORT_GPU_TIME set): timestamps around
   // each piece of work, by kind, read a few frames late.
   enum Work { kIdle, kSlow, kFast, kFlush, kLoad, kUpload, kCopy, kClut, kPicture, kWorks };
@@ -393,6 +435,7 @@ struct GsGpu::Impl {
     ComPtr<ID3D11Query> disjoint;
     std::vector<ComPtr<ID3D11Query>> queries;
     std::vector<int> works;  // what follows each stamp
+    std::vector<int> labels;  // (CODPORT_GPU_RUNS) the hardware run it belongs to
     bool pending = false, open = false;
   };
   std::array<FrameStamps, 8> stamps;
@@ -406,6 +449,12 @@ struct GsGpu::Impl {
   }
   void mark(int work);
   void frameTimer();
+  // CODPORT_GPU_RUNS: hardware draw time by kind of run, printed at the end.
+  int runLabel = 0;
+  std::vector<std::string> labelNames{""};
+  std::map<std::string, int> labelIds;
+  std::vector<double> labelMs{0};
+  std::vector<uint64_t> labelRuns{0}, labelPrims{0}, labelArea{0};
   struct Busy {  // a piece of GPU work
     Impl& m;
     Busy(Impl& m, int work) : m(m) { m.mark(work); }
@@ -650,13 +699,39 @@ struct GsGpu::Impl {
   // (whose pixels lose their low bits). One copy serves a run, so its primitives must not overlap.
   bool readsDestination(const Gs::Command& c) const {
     const Gs::Draw& d = c.d;
-    if (c.type != 6 || (d.blend && d.pabe)) return false;
+    if (d.blend && d.pabe) return false;
+    // A run's primitives must not overlap: sprites seldom do, triangles of a strip always touch. So
+    // only where nothing else does C = the destination's alpha (each a run of its own, if need be).
+    if (c.type != 6) return d.blend && d.bc == 1 && !d.date;
     if (d.date) return true;
     if (!d.blend) return false;
     return d.bc == 1 || (weightedBlend(d) && (d.fb16 || (d.tme && !paletted(d.tpsm) && (texPages(c) & rendered).any())));
   }
   // The blend's result can go below 0, which signed surfaces do not clamp by themselves.
   static bool subtracts(const Gs::Draw& d);
+  // A texture over pages that several surfaces of its own layout hold (buffers a few pages apart that
+  // overlap, as the game's glow is drawn and read), put together on the graphics card: each page copied
+  // from the surface holding it, the rest loaded from memory. Without it all of them went to memory and
+  // back, every frame, and the texture was read at the PS2's resolution. Null if it is not such a case.
+  ID3D11ShaderResourceView* assembledTexture(const std::vector<Gs::Command>& commands, size_t first, size_t end, const Pages& reads,
+                                             uint32_t& kind);
+  struct Assembly {
+    ComPtr<ID3D11Texture2D> tex;
+    ComPtr<ID3D11ShaderResourceView> srv;
+    ComPtr<ID3D11UnorderedAccessView> uav;
+    uint32_t width = 0, height = 0;
+    // What it holds: the texture layout, and each page's write count when it was put there (+1; 0 = not
+    // there). Runs read the same pages again and again (a blur in strips): unchanged ones stay.
+    uint32_t tbp = ~0u, tbw = 0, tpsm = 0;
+    std::array<uint64_t, 512> pageWrites{};
+  };
+  Assembly assemblies[2];  // colour, count
+  uint64_t pageWritten(size_t p) const {
+    uint64_t sum = 1;
+    for (size_t b = p * 32; b < p * 32 + 32; ++b) sum += blockWrites[b];
+    return sum;
+  }
+  uint64_t assembledPages = 0;
   int textureSurface(const std::vector<Gs::Command>& commands, size_t first, size_t end, const Pages& reads) const;
   Pages pagesOf(const Surface& s) const { return pagesOf(s.bp, s.bw, s.psm, 0, 0, int(s.width) - 1, int(s.height) - 1); }
   // The samples of a surface that these pages cover, [x0, x1) x [y0, y1); empty if none.
@@ -669,7 +744,75 @@ struct GsGpu::Impl {
   ID3D11DepthStencilState* depthState(const Gs::Draw& d, bool write);
   static bool fastBlend(const Gs::Draw& d, D3D11_RENDER_TARGET_BLEND_DESC* out);
   static bool fastPath(const Gs::Draw& d);
+  // A run of flat sprites side by side over a box (`tiled`), one colour and depth, written whole:
+  // the box cleared to that instead (the game clears its picture and buffers so, a full-screen pass
+  // each). Its depth too when it writes depth, if the box holds all of the depth surface.
+  ComPtr<ID3D11DeviceContext1> ctx1;
+  int clearRun(const std::vector<Gs::Command>& commands, size_t first, size_t end, bool tiled, int colour, int depth, int x0, int y0,
+                int x1, int y1, float zScale);
+  std::vector<std::thread> compilers;  // (last: joined before the device goes)
+  ~Impl() {
+    for (std::thread& t : compilers) t.join();
+  }
 };
+
+void GsGpu::Impl::compileVariant(size_t i) {
+  const bool exportDepth = i / 10 != 0;
+  const uint32_t tex = uint32_t(i / 2 % 5), dest = uint32_t(i % 2);
+  std::string error;
+  const std::string source = variantHead + std::format("#define CACHED_TEXTURES\n#define EXPORT_DEPTH {}\n#define SPEC_TEX {}\n#define SPEC_DEST {}\n",
+                                                       int(exportDepth), tex, dest) + variantBody;
+  if (ComPtr<ID3DBlob> code = compile(source, "ps_5_0", error))
+    if (SUCCEEDED(dev->CreatePixelShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr, &variants[i].ps))) variants[i].ready = true;
+}
+
+int GsGpu::Impl::clearRun(const std::vector<Gs::Command>& commands, size_t first, size_t end, bool tiled, int colour, int depth, int x0,
+                           int y0, int x1, int y1, float zScale) {
+  static const bool off = std::getenv("CODPORT_NOCLEAR") != nullptr;  // for comparisons
+  const Gs::Draw& d = commands[first].d;
+  if (off || !tiled || d.fge || d.date || d.fb24 || (d.ztest && d.ztst != 1)) return 0;
+  const Gs::Vertex& v = commands[first].v[1];
+  for (size_t k = first; k < end; ++k) {
+    const Gs::Vertex& w = commands[k].v[1];
+    if (commands[k].d.fge != d.fge || w.r != v.r || w.g != v.g || w.b != v.b || w.a != v.a || std::min(w.z, d.zmax) != std::min(v.z, d.zmax))
+      return 0;
+  }
+  const bool writeZ = d.ztest && d.zwrite && !(d.ate && d.atst == 0);  // (failing ones keep the frame buffer only)
+  const bool depth16 = d.zpsm == PSMZ16 || d.zpsm == PSMZ16S;
+  Surface& cs = surfaces[size_t(colour)];
+  if (!ctx1 && FAILED(ctx.As(&ctx1))) return 0;
+  int how = 1;
+  if (writeZ) {
+    const Surface& ds = surfaces[size_t(depth)];
+    const uint32_t z = std::min(v.z, d.zmax);
+    if (z >= (1u << 24) && d.zpsm == PSMZ32) return 0;
+    if (x0 <= 0 && y0 <= 0 && uint32_t(x1 + 1) >= ds.width && uint32_t(y1 + 1) >= ds.height) ctx->ClearDepthStencilView(ds.dsv.Get(), D3D11_CLEAR_DEPTH, float(z) * zScale, 0);
+    else if (depth16) how = 2;
+    else return 0;
+  }
+  const uint8_t a = d.fba ? uint8_t(v.a | 0x80) : v.a;
+  const float value[4] = {cs.count ? float(v.r >> 3) : v.r / 255.0f, cs.count ? float(v.g >> 3) : v.g / 255.0f,
+                          cs.count ? float(v.b >> 3) : v.b / 255.0f, cs.count ? float((a >> 7) & 1) : a / 255.0f};
+  const D3D11_RECT rect{LONG(std::max(x0, 0)) * LONG(scale), LONG(std::max(y0, 0)) * LONG(scale), LONG(std::min(uint32_t(x1 + 1), cs.width)) * LONG(scale),
+                        LONG(std::min(uint32_t(y1 + 1), cs.height)) * LONG(scale)};
+  Busy busy(*this, kFast);
+  ctx1->ClearView(cs.rtv.Get(), value, &rect, 1);
+  ++clearedRuns;
+  return how;
+}
+
+void GsGpu::compileAllShaders() {
+  for (size_t i = 0; i < Impl::kVariants; ++i)
+    if (!impl_->variants[i].asked.exchange(true)) impl_->compileVariant(i);
+}
+
+ID3D11PixelShader* GsGpu::Impl::fastVariant(bool exportDepth, uint32_t tex, bool dest) {
+  const size_t i = (exportDepth ? 10 : 0) + tex * 2 + (dest ? 1 : 0);
+  Variant& v = variants[i];
+  if (v.ready.load(std::memory_order_acquire)) return v.ps.Get();
+  if (!v.asked.exchange(true)) compilers.emplace_back([this, i] { compileVariant(i); });
+  return (exportDepth ? fastDepthPs : fastPs).Get();
+}
 
 bool GsGpu::Impl::init(void* window, std::string& error) {
   const D3D_FEATURE_LEVEL levels[] = {D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0};
@@ -782,6 +925,7 @@ bool GsGpu::Impl::init(void* window, std::string& error) {
       "ByteAddressBuffer gsMem : register(t3);\n#define MEM gsMem\n#define SURFACE_TEXTURE\n"
       "Texture2D<float4> texSurface : register(t4);\ncbuffer TexSource : register(b1) { uint texFromSurface; };\n";
   const std::string fastBody = std::string(gpu_hlsl::kDrawShared) + gpu_hlsl::kFastPs;
+  variantHead = std::string(roT3) + common, variantBody = fastBody;
   ComPtr<ID3DBlob> fastCode = compile(with(roT3, ("#define CACHED_TEXTURES\n#define EXPORT_DEPTH 0\n" + fastBody).c_str()), "ps_5_0", error);
   ComPtr<ID3DBlob> fastDepthCode = compile(with(roT3, ("#define CACHED_TEXTURES\n#define EXPORT_DEPTH 1\n" + fastBody).c_str()), "ps_5_0", error);
   ComPtr<ID3DBlob> decodeCode = compile(with(roT3, (std::string(gpu_hlsl::kDrawShared) + gpu_hlsl::kDecodeCs).c_str()), "cs_5_0", error);
@@ -871,7 +1015,7 @@ bool GsGpu::Impl::init(void* window, std::string& error) {
   D3D11_BUFFER_DESC cb{256, D3D11_USAGE_DYNAMIC, D3D11_BIND_CONSTANT_BUFFER, D3D11_CPU_ACCESS_WRITE, 0, 0};
   dev->CreateBuffer(&cb, nullptr, &constants);
   dev->CreateBuffer(&cb, nullptr, &primStateBuffer);
-  for (uint32_t i = 0; i < 3; ++i) {
+  for (uint32_t i = 0; i < 4; ++i) {
     const uint32_t v[4] = {i};
     D3D11_BUFFER_DESC tb{16, D3D11_USAGE_IMMUTABLE, D3D11_BIND_CONSTANT_BUFFER, 0, 0, 0};
     D3D11_SUBRESOURCE_DATA init{v, 0, 0};
@@ -1015,6 +1159,7 @@ void GsGpu::Impl::flush(int index) {
   for (size_t p = 0; p < 512; ++p)
     if (owner[p] == index && memStale[p]) mask.set(p);
   if (mask.none()) return;
+  flushedPages[flushReason] += mask.count();
   struct {
     uint32_t bp, bw, psm, kind, width, height;
     float zMul;
@@ -1074,7 +1219,9 @@ int GsGpu::Impl::surfaceFor(uint32_t bp, uint32_t bw, uint32_t psm, bool depth, 
     Surface& sf = surfaces[size_t(index)];
     if (sf.width >= width && sf.height >= height) return sf.lastUsed = drawBatches, index;
     // Too small: its pixels go to memory and it starts again, larger, from there.
+    flushReason = "surface grows";
     flush(index);
+    flushReason = "other";
     for (size_t p = 0; p < 512; ++p)
       if (owner[p] == index) owner[p] = -1, ownerStale.reset(p), held.reset(p);
     width = std::max(width, sf.width), height = std::max(height, sf.height);
@@ -1270,6 +1417,98 @@ ID3D11BlendState* GsGpu::Impl::blendState(const Gs::Draw& d, UINT8 writeMask, bo
 
 // The colour surface a run's textures can be read from: one 32 or 24-bit texture, all of whose
 // pages that surface holds as they are (else -1: they are read from memory).
+ID3D11ShaderResourceView* GsGpu::Impl::assembledTexture(const std::vector<Gs::Command>& commands, size_t first, size_t end,
+                                                         const Pages& reads, uint32_t& kind) {
+  const Gs::Draw* tex = nullptr;
+  for (size_t k = first; k < end; ++k) {
+    const Gs::Draw& d = commands[k].d;
+    if (!d.tme) continue;
+    if (tex && (d.tbp != tex->tbp || d.tbw != tex->tbw || d.tpsm != tex->tpsm)) return nullptr;
+    tex = &d;
+  }
+  if (!tex || tex->tbp % 32 || tex->tbw == 0) return nullptr;
+  const bool sixteen = tex->tpsm == PSMCT16 || tex->tpsm == PSMCT16S;
+  if (!sixteen && tex->tpsm != PSMCT32 && tex->tpsm != PSMCT24) return nullptr;
+  const uint32_t pw = 64, ph = sixteen ? 64 : 32, perRow = tex->tbw;
+  // Each page read: from a surface of the texture's layout that holds it (all of one kind), or from memory.
+  int count = -1;
+  bool anyHeld = false;
+  Pages fromMemory;
+  for (size_t p = 0; p < 512; ++p) {
+    if (!reads[p]) continue;
+    const int o = owner[p];
+    if (o < 0 || ownerStale[p]) {
+      if (memStale[p]) return nullptr;  // newer in a surface that is not this layout's
+      fromMemory.set(p);
+      continue;
+    }
+    const Surface& sf = surfaces[size_t(o)];
+    if (sf.depth || sf.psm != tex->tpsm || sf.bw != tex->tbw || sf.bp % 32) return nullptr;
+    if (count >= 0 && count != int(sf.count)) return nullptr;
+    count = int(sf.count), anyHeld = true;
+  }
+  if (!anyHeld) return nullptr;  // memory alone: the usual way
+  // The place it is put together in, as large as the texture.
+  const uint32_t tw = std::min(uint32_t(tex->tw), perRow * pw), th = std::min(uint32_t(tex->th), 2048u);
+  Assembly& a = assemblies[count];
+  if (a.width < tw || a.height < th) {
+    a = Assembly{};
+    D3D11_TEXTURE2D_DESC td{tw * scale, th * scale, 1, 1, count ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_R16G16B16A16_SNORM, {1, 0},
+                            D3D11_USAGE_DEFAULT, D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS, 0, 0};
+    if (FAILED(dev->CreateTexture2D(&td, nullptr, &a.tex))) return a = Assembly{}, nullptr;
+    dev->CreateShaderResourceView(a.tex.Get(), nullptr, &a.srv);
+    dev->CreateUnorderedAccessView(a.tex.Get(), nullptr, &a.uav);
+    a.width = tw, a.height = th;
+  }
+  if (a.tbp != tex->tbp || a.tbw != tex->tbw || a.tpsm != tex->tpsm) a.tbp = tex->tbp, a.tbw = tex->tbw, a.tpsm = tex->tpsm, a.pageWrites.fill(0);
+  Pages current;  // already there as they are now
+  for (size_t p = 0; p < 512; ++p)
+    if (reads[p]) {
+      const uint64_t w = pageWritten(p);
+      if (a.pageWrites[p] == w) current.set(p);
+      a.pageWrites[p] = w;
+    }
+  fromMemory &= ~current;
+  {
+    Busy busy(*this, kCopy);
+    for (size_t p = 0; p < 512; ++p) {
+      if (!reads[p] || fromMemory[p] || current[p]) continue;
+      const uint32_t at = (uint32_t(p) - tex->tbp / 32) & 511;  // the page's place in the texture
+      const uint32_t tx = at % perRow * pw, ty = at / perRow * ph;
+      if (tx >= tw || ty >= th) continue;
+      const Surface& sf = surfaces[size_t(owner[p])];
+      const uint32_t in = (uint32_t(p) - sf.bp / 32) & 511;  // and in the surface
+      const uint32_t sx = in % perRow * pw, sy = in / perRow * ph;
+      if (sx >= sf.width || sy >= sf.height) continue;
+      const uint32_t w = std::min({pw, sf.width - sx, tw - tx}), h = std::min({ph, sf.height - sy, th - ty});
+      const D3D11_BOX box{sx * scale, sy * scale, 0, (sx + w) * scale, (sy + h) * scale, 1};
+      ctx->CopySubresourceRegion(a.tex.Get(), 0, tx * scale, ty * scale, 0, sf.tex.Get(), 0, &box);
+      ++assembledPages;
+    }
+  }
+  if (fromMemory.any()) {  // as a surface loads them (use)
+    uint32_t c[24] = {tex->tbp, tex->tbw, tex->tpsm, tw * scale, th * scale, 0};
+    for (size_t p = 0; p < 512; ++p)
+      if (fromMemory[p]) c[8 + (p >> 5)] |= 1u << (p & 31);
+    setConstants(c, sizeof(c));
+    ID3D11ShaderResourceView* srvs[2] = {memSrv.Get(), swzSrv.Get()};
+    ctx->CSSetShader((count ? memToCountCs : memToSurfaceCs).Get(), nullptr, 0);
+    ctx->CSSetShaderResources(0, 2, srvs);
+    ctx->CSSetUnorderedAccessViews(0, 1, a.uav.GetAddressOf(), nullptr);
+    ctx->CSSetConstantBuffers(0, 1, constants.GetAddressOf());
+    {
+      Busy busy(*this, kLoad);
+      ctx->Dispatch((tw * scale + 7) / 8, (th * scale + 7) / 8, 1);
+    }
+    ID3D11ShaderResourceView* noSrvs[2] = {};
+    ID3D11UnorderedAccessView* noUav = nullptr;
+    ctx->CSSetShaderResources(0, 2, noSrvs);
+    ctx->CSSetUnorderedAccessViews(0, 1, &noUav, nullptr);
+  }
+  kind = count ? 2 : sixteen ? 3 : 1;
+  return a.srv.Get();
+}
+
 int GsGpu::Impl::textureSurface(const std::vector<Gs::Command>& commands, size_t first, size_t end, const Pages& reads) const {
   const Gs::Draw* tex = nullptr;
   for (size_t k = first; k < end; ++k) {
@@ -1282,10 +1521,11 @@ int GsGpu::Impl::textureSurface(const std::vector<Gs::Command>& commands, size_t
   if (!tex || (!count && tex->tpsm != PSMCT32 && tex->tpsm != PSMCT24)) return -1;
   for (size_t i = 0; i < surfaces.size(); ++i) {
     const Surface& sf = surfaces[i];
-    if (sf.depth || sf.count != count || sf.bp != tex->tbp || sf.bw != tex->tbw || sf.psm != tex->tpsm) continue;
-    for (size_t p = 0; p < 512; ++p)
-      if (reads[p] && (owner[p] != int(i) || ownerStale[p])) return -1;
-    return int(i);
+    // (A 16-bit texture off a count surface or a 16-bit colour one: either way as memory would hold it.)
+    if (sf.depth || !sf.tex || sf.bp != tex->tbp || sf.bw != tex->tbw || sf.psm != tex->tpsm) continue;
+    bool all = true;  // (a count surface and a colour one may share the place: the one holding the pages)
+    for (size_t p = 0; p < 512 && all; ++p) all = !reads[p] || (owner[p] == int(i) && !ownerStale[p]);
+    if (all) return int(i);
   }
   return -1;
 }
@@ -1401,6 +1641,19 @@ GsGpu::~GsGpu() {
     }
     D3D11_BUFFER_DESC bd{};
     impl_->mem->GetDesc(&bd);
+    if (std::getenv("CODPORT_GPU_RUNS")) {
+      std::vector<size_t> order(impl_->labelNames.size());
+      for (size_t i = 0; i < order.size(); ++i) order[i] = i;
+      std::sort(order.begin(), order.end(), [&](size_t a, size_t b) { return impl_->labelMs[a] > impl_->labelMs[b]; });
+      for (size_t i = 0; i < std::min<size_t>(order.size(), 30); ++i)
+        if (const size_t l = order[i]; l)
+          std::printf("   RUN %.1f ms, %llu runs, %llu prims, %llu px box: %s\n", impl_->labelMs[l], (unsigned long long)impl_->labelRuns[l],
+                      (unsigned long long)impl_->labelPrims[l], (unsigned long long)impl_->labelArea[l], impl_->labelNames[l].c_str());
+    }
+    for (const auto& [why, n] : impl_->slowDrawsWhy) std::printf("   slow draws, %s: %llu (%llu px)\n", why.c_str(), (unsigned long long)n, (unsigned long long)impl_->slowArea[why]);
+    std::printf("   runs cleared by the card: %llu\n", (unsigned long long)impl_->clearedRuns);
+    std::printf("   pages put together into textures on the card: %llu\n", (unsigned long long)impl_->assembledPages);
+    for (const auto& [why, pages] : impl_->flushedPages) std::printf("   pages to memory, %s: %llu\n", why.c_str(), (unsigned long long)pages);
     std::printf("   video memory (MB): surfaces %.0f colour + %.0f depth, their copies %.0f, GS memory %.0f, low-res %.0f\n", colour / 1048576.0,
                 depth / 1048576.0, copies / 1048576.0, bd.ByteWidth / 1048576.0,
                 (bytesOf(impl_->lowTex.Get()) + bytesOf(impl_->lowLastTex.Get())) / 1048576.0);
@@ -1421,6 +1674,16 @@ void GsGpu::draw(const std::vector<Gs::Command>& commands) {
     ways[k] = m.fast(commands[k]);
     if (ways[k] && m.readsDestination(commands[k])) ways[k] = 2;
     if (ways[k] == 1 && (commands[k].d.date || (commands[k].d.blend && (commands[k].d.bc == 1 || commands[k].d.fb16) && !Impl::counting(commands[k].d)))) ways[k] = 0;
+    static const bool why = std::getenv("CODPORT_GPU_STATS") != nullptr;
+    if (why && ways[k] == 0) {
+      const Gs::Command& c = commands[k];
+      const Gs::Draw& d = c.d;
+      int x0, y0, x1, y1;
+      Impl::bounds(c, x0, y0, x1, y1);
+      const std::string key = std::format("{} | type {} fb {}/{}/{:02X} msk {:08X} z {}/{:02X} ztst {} zw {} tex {} {}/{}/{:02X} {}x{} blend {} {}{}{}{} date {} ate {}", m.slowReason(c), c.type, d.fbp, d.fbw, d.fpsm, d.fbmsk, d.zbp, d.zpsm, d.ztst, d.zwrite, d.tme, d.tbp, d.tbw, d.tpsm, d.tw, d.th, d.blend, d.ba, d.bb, d.bc, d.bd, d.date, d.ate);
+      ++m.slowDrawsWhy[key];
+      m.slowArea[key] += uint64_t(std::max(0, x1 - x0 + 1)) * uint64_t(std::max(0, y1 - y0 + 1));
+    }
   }
   // On the hardware path the vertices carry what varies: equal draws in a row share one state.
   const Gs::Draw* sharedDraw = nullptr;
@@ -1618,8 +1881,10 @@ void GsGpu::Impl::drawSlow(const std::vector<Gs::Command>& commands, size_t firs
     if (d.ztest) (writesDepth(d) ? writes : reads) |= pagesOf(d.zbp, d.fbw, d.zpsm, bx0, by0, bx1, by1);
     if (d.tme) reads |= texPages(commands[k]);
   }
+  flushReason = "GS-memory draw";
   memRead(reads);
   memWrite(writes);
+  flushReason = "other";
   rendered |= writes;
   bindDrawInput();
   ctx->PSSetShader(drawPs.Get(), nullptr, 0);
@@ -1693,6 +1958,21 @@ void GsGpu::Impl::drawFast(const std::vector<Gs::Command>& commands, size_t firs
     x0 = std::min(x0, bx0), y0 = std::min(y0, by0), x1 = std::max(x1, bx1), y1 = std::max(y1, by1);
   }
   if (x1 < x0 || y1 < y0) return;  // nothing inside the scissor
+  static const bool runs = std::getenv("CODPORT_GPU_RUNS") != nullptr;
+  struct ClearLabel {
+    int& l;
+    ~ClearLabel() { l = 0; }
+  } clearLabel{runLabel};
+  if (runs) {
+    const std::string key = std::format("fb {}/{:02X} z {} tex {} {}/{:02X} {}x{} lin {} blend {} {}{}{}{} ate {} type {} {}", d.fbp, d.fpsm,
+                                        d.ztest ? int(d.ztst) : -1, d.tme, d.tbp, d.tpsm, d.tw, d.th, d.linear, d.blend, d.ba, d.bb, d.bc, d.bd,
+                                        d.ate, commands[first].type, destRead ? "dest" : "");
+    auto [it, added] = labelIds.try_emplace(key, int(labelNames.size()));
+    if (added) labelNames.push_back(key), labelMs.push_back(0), labelRuns.push_back(0), labelPrims.push_back(0), labelArea.push_back(0);
+    runLabel = it->second;
+    ++labelRuns[size_t(runLabel)], labelPrims[size_t(runLabel)] += end - first;
+    labelArea[size_t(runLabel)] += uint64_t(x1 - x0 + 1) * uint64_t(y1 - y0 + 1);
+  }
   const uint32_t width = d.fbw * 64, height = uint32_t(y1) + 1;
   const bool counts = counting(d);
   int colour = surfaceFor(d.fbp, d.fbw, d.fpsm, false, width, height, counts);
@@ -1708,8 +1988,8 @@ void GsGpu::Impl::drawFast(const std::vector<Gs::Command>& commands, size_t firs
   const Pages drawnDepth = depth >= 0 ? pagesOf(d.zbp, d.fbw, d.zpsm, x0, y0, x1, y1) : Pages();
   // A clear: flat sprites that write everything in the box, side by side.
   Pages cleared;
+  int cx0 = 2047, cy0 = 2047, cx1 = -1, cy1 = -1;
   if (!d.tme && !d.blend && d.fbmsk == 0 && (!d.ate || d.atst == 1 || (d.atst == 0 && d.afail == 1))) {
-    int cx0 = 2047, cy0 = 2047, cx1 = -1, cy1 = -1;
     int64_t area = 0;
     bool sprites = true;
     for (size_t k = first; k < end && sprites; ++k) {
@@ -1738,11 +2018,68 @@ void GsGpu::Impl::drawFast(const std::vector<Gs::Command>& commands, size_t firs
   ID3D11ShaderResourceView* texSrv = nullptr;
   uint32_t texSourceKind = 0;
   const int ts = textureSurface(commands, first, end, reads);
-  if (ts < 0) {
+  if (ts < 0) texSrv = assembledTexture(commands, first, end, reads, texSourceKind);
+  if (ts < 0 && !texSrv) {
+    flushReason = "texture from memory";
+    static const bool why = std::getenv("CODPORT_GPU_STATS") != nullptr;
+    static std::string detail;
+    if (why) {  // what kept the texture from being read off the surface that holds it
+      const Gs::Draw* tex = nullptr;
+      bool mixed = false;
+      for (size_t k = first; k < end; ++k)
+        if (commands[k].d.tme) {
+          if (tex && (commands[k].d.tbp != tex->tbp || commands[k].d.tpsm != tex->tpsm)) mixed = true;
+          tex = &commands[k].d;
+        }
+      for (size_t p = 0; p < 512 && tex; ++p)
+        if (reads[p] && owner[p] >= 0 && memStale[p]) {
+          const Surface& sf = surfaces[size_t(owner[p])];
+          detail = std::format("texture psm {:02X} bw {} of a surface psm {:02X} bw {}{}: bp {}{}{}", tex->tpsm, tex->tbw, sf.psm, sf.bw,
+                               sf.depth ? " (depth)" : "", tex->tbp == sf.bp ? "same" : (int(tex->tbp) - int(sf.bp)) % 32 == 0 ? "pages apart" : "blocks apart",
+                               mixed ? ", several textures" : "", ownerStale[p] ? ", surface stale" : "");
+          // Of the pages read: held by a surface at the texture's own place, by another surface, by none.
+          int own = 0, other = 0, none = 0, stale = 0;
+          for (size_t q = 0; q < 512; ++q) {
+            if (!reads[q]) continue;
+            if (owner[q] < 0) ++none;
+            else if (surfaces[size_t(owner[q])].bp == tex->tbp && surfaces[size_t(owner[q])].psm == tex->tpsm) ++own;
+            else ++other;
+            if (owner[q] >= 0 && ownerStale[q]) ++stale;
+          }
+          detail += std::format(" [{}{}{}{}]", own ? "own " : "", other ? "other-surface " : "", none ? "memory " : "", stale ? "stale" : "");
+          if (other) {
+            for (size_t q = 0; q < 512; ++q)
+              if (reads[q] && owner[q] >= 0 && surfaces[size_t(owner[q])].bp != tex->tbp) {
+                const Surface& o = surfaces[size_t(owner[q])];
+                detail += std::format(" other: psm {:02X} bw {} bp {:+}{}", o.psm, o.bw, int(o.bp) - int(tex->tbp), o.depth ? " depth" : "");
+                static int shown = 0;
+                if (int(o.bp) - int(tex->tbp) == 1024 && shown++ < 6) {
+                  int tx0, ty0, tx1, ty1;
+                  for (size_t k = first; k < end; ++k)
+                    if (commands[k].d.tme) {
+                      texRect(commands[k], tx0, ty0, tx1, ty1);
+                      const Gs::Command& c = commands[k];
+                      std::printf("  +1024 case: tex %ux%u tbp %u rect %d,%d-%d,%d type %u fst %d wms %u wmt %u | fb %u psm %02X | own surface h %u, other h %u | v0 %.1f,%.1f uv %u,%u v1 %.1f,%.1f uv %u,%u\n",
+                                  c.d.tw, c.d.th, c.d.tbp, tx0, ty0, tx1, ty1, c.type, int(c.d.fst), c.d.wms, c.d.wmt, c.d.fbp, c.d.fpsm,
+                                  surfaces[size_t(owner[q])].height, o.height, c.v[0].x / 16.0, c.v[0].y / 16.0, c.v[0].u, c.v[0].v,
+                                  c.v[1].x / 16.0, c.v[1].y / 16.0, c.v[1].u, c.v[1].v);
+                      break;
+                    }
+                }
+                break;
+              }
+          }
+          flushReason = detail.c_str();
+          break;
+        }
+    }
     memRead(reads);
+    flushReason = "other";
+  } else if (ts < 0) {
+    // put together from several surfaces (assembledTexture)
   } else if (ts != colour) {
     texSrv = surfaces[size_t(ts)].srv.Get();
-    texSourceKind = surfaces[size_t(ts)].count ? 2 : 1;
+    texSourceKind = sourceKind(surfaces[size_t(ts)]);
   } else {  // the part read of the frame buffer drawn, as it was before
     Surface& sf = surfaces[size_t(colour)];
     int tx0 = INT32_MAX, ty0 = INT32_MAX, tx1 = -1, ty1 = -1;
@@ -1753,7 +2090,7 @@ void GsGpu::Impl::drawFast(const std::vector<Gs::Command>& commands, size_t firs
       tx0 = std::min(tx0, a0), ty0 = std::min(ty0, b0), tx1 = std::max(tx1, a1), ty1 = std::max(ty1, b1);
     }
     texSrv = snapshot(sf, tx0, ty0, tx1, ty1);
-    texSourceKind = sf.count ? 2 : 1;
+    texSourceKind = sourceKind(sf);
   }
   ID3D11ShaderResourceView* destSrv = destRead ? snapshot(surfaces[size_t(colour)], x0, y0, x1, y1) : nullptr;
   // Filtered textures from memory: decoded (now that memory is up to date) for the GPU's filter.
@@ -1763,7 +2100,7 @@ void GsGpu::Impl::drawFast(const std::vector<Gs::Command>& commands, size_t firs
     const uint32_t id = commandState[k];
     if (stateRun[id] == runNo) continue;
     stateRun[id] = runNo;
-    stateTex[id] = ts < 0 ? decoded(commands[k].d) : nullptr;
+    stateTex[id] = ts < 0 && !texSrv ? decoded(commands[k].d) : nullptr;
     states[id].flags = stateTex[id] ? states[id].flags | F_CACHED : states[id].flags & ~uint32_t(F_CACHED);
   }
   const Surface& cs = surfaces[size_t(colour)];
@@ -1771,7 +2108,9 @@ void GsGpu::Impl::drawFast(const std::vector<Gs::Command>& commands, size_t firs
   const bool depth16 = d.zpsm == PSMZ16 || d.zpsm == PSMZ16S;
   const float zScale = depth16 ? 1.0f / 65535 : d.zpsm == PSMZ24 ? 1.0f / 16777216 : 1.0f / 4294967296.0f;
   ctx->OMSetRenderTargets(1, cs.rtv.GetAddressOf(), depth >= 0 ? surfaces[size_t(depth)].dsv.Get() : nullptr);
-  ctx->PSSetShader((d.ztest && !depth16 ? fastDepthPs : fastPs).Get(), nullptr, 0);
+  bool textured = false;
+  for (size_t k = first; k < end && !textured; ++k) textured = commands[k].d.tme;
+  ctx->PSSetShader(fastVariant(d.ztest && !depth16, !textured ? 0 : texSrv ? texSourceKind : 4, destRead), nullptr, 0);
   ID3D11ShaderResourceView* srvs[6] = {nullptr, swzSrv.Get(), clutSrv.Get(), memSrv.Get(), texSrv, destSrv};
   ctx->PSSetShaderResources(0, 6, srvs);
   ctx->PSSetConstantBuffers(1, 1, texSource[texSourceKind].GetAddressOf());
@@ -1801,7 +2140,14 @@ void GsGpu::Impl::drawFast(const std::vector<Gs::Command>& commands, size_t firs
     drawStates(first, end);
   };
   const bool zwrite = d.ztest && d.zwrite;
-  if (lowResRun(commands, first, end, x0, y0, x1, y1, destRead) && drawLowRes(first, end, d, depth, zScale, alpha, x0, y0, x1, y1, cs)) {
+  if (const int how = clearRun(commands, first, end, cleared.any(), colour, depth, cx0, cy0, cx1, cy1, zScale)) {
+    // cleared by the graphics card itself (ClearView): what drawing the sprites writes, without drawing them;
+    // a 16-bit depth over part of its surface drawn alone, with no pixel shader (the depth is the vertices')
+    if (how == 2) {
+      ctx->PSSetShader(nullptr, nullptr, 0);
+      pass(0, false, false, true);
+    }
+  } else if (lowResRun(commands, first, end, x0, y0, x1, y1, destRead) && drawLowRes(first, end, d, depth, zScale, alpha, x0, y0, x1, y1, cs)) {
     // drawn at the GS's resolution
   } else if (!d.ate || d.atst == 1 || d.afail == 0) {  // failing samples are dropped (or there are none)
     if (!d.ate || d.atst != 0 || d.afail != 0) pass(0, rgb, alpha, zwrite);
@@ -2111,7 +2457,9 @@ void GsGpu::upload(uint64_t bitbltbuf, uint64_t trxpos, uint64_t trxreg, const s
   const int dx = int(bits(trxpos, 32, 11)), dy = int(bits(trxpos, 48, 11));
   const Impl::Pages uploaded = Impl::pagesOf(bits(bitbltbuf, 32, 14), bits(bitbltbuf, 48, 6), dpsm, dx, dy, dx + int(rrw) - 1, dy + int(rrh) - 1);
   m.memStale &= ~Impl::wholePages(bits(bitbltbuf, 32, 14), bits(bitbltbuf, 48, 6), dpsm, dx, dy, dx + int(rrw) - 1, dy + int(rrh) - 1);
+  m.flushReason = "upload";
   m.memWrite(uploaded, false);
+  m.flushReason = "other";
   {
     const uint32_t dbp = bits(bitbltbuf, 32, 14), dbw = bits(bitbltbuf, 48, 6);
     const uint32_t x1 = uint32_t(dx) + rrw - 1, y1 = uint32_t(dy) + rrh - 1;
@@ -2147,8 +2495,13 @@ void GsGpu::copy(uint64_t bitbltbuf, uint64_t trxpos, uint64_t trxreg) {
   const uint32_t rrw = bits(trxreg, 0, 12), rrh = bits(trxreg, 32, 12);
   if (!rrw || !rrh) return;
   const int sx = int(bits(trxpos, 0, 11)), sy = int(bits(trxpos, 16, 11)), dx = int(bits(trxpos, 32, 11)), dy = int(bits(trxpos, 48, 11));
+  if (static const bool why = std::getenv("CODPORT_GPU_STATS") != nullptr; why)
+    ++m.slowDrawsWhy[std::format("COPY {:02X}->{:02X} {}x{} bp {} -> {} bw {} {}", bits(bitbltbuf, 24, 6), bits(bitbltbuf, 56, 6), rrw, rrh,
+                                  bits(bitbltbuf, 0, 14), bits(bitbltbuf, 32, 14), bits(bitbltbuf, 16, 6), bits(bitbltbuf, 48, 6))];
+  m.flushReason = "copy";
   m.memRead(Impl::pagesOf(bits(bitbltbuf, 0, 14), bits(bitbltbuf, 16, 6), bits(bitbltbuf, 24, 6), sx, sy, sx + int(rrw) - 1, sy + int(rrh) - 1));
   m.memWrite(Impl::pagesOf(bits(bitbltbuf, 32, 14), bits(bitbltbuf, 48, 6), bits(bitbltbuf, 56, 6), dx, dy, dx + int(rrw) - 1, dy + int(rrh) - 1));
+  m.flushReason = "other";
   uint32_t c[14] = {bits(bitbltbuf, 0, 14),  bits(bitbltbuf, 16, 6), bits(bitbltbuf, 24, 6), bits(trxpos, 0, 11), bits(trxpos, 16, 11),
                     bits(bitbltbuf, 32, 14), bits(bitbltbuf, 48, 6), bits(bitbltbuf, 56, 6), bits(trxpos, 32, 11), bits(trxpos, 48, 11),
                     rrw,                     std::min(rrw * rrh, 2048u * 2048u), 0, 0};
@@ -2182,7 +2535,9 @@ uint32_t GsGpu::loadClut(uint32_t previous, uint32_t cbp, uint32_t clutPsm, uint
   }
   if (!key.known) key.memory = m.writesOf(cbp, sbw, clutPsm, sx0, sy0, sx1, sy1);
   if (auto it = m.clutCache.find(key); it != m.clutCache.end()) return it->second;
+  m.flushReason = "palette";
   m.memRead(source);
+  m.flushReason = "other";
   // Slots are reused in turn; draws using an old one were issued before it is overwritten.
   const uint32_t slot = m.nextClut;
   m.nextClut = m.nextClut + 1 == kClutSlots ? 1 : m.nextClut + 1;
@@ -2225,7 +2580,7 @@ bool GsGpu::Impl::makePicture(const Gs::Display& d, uint32_t pictureScale) {
     for (size_t p = 0; p < 512 && all; ++p) all = !shown[p] || (owner[p] == int(i) && !ownerStale[p]);
     if (all) holder = &sf;
   }
-  if (!holder) memRead(shown);
+  if (!holder) flushReason = "picture", memRead(shown), flushReason = "other";
   const uint32_t w = d.width * pictureScale, h = d.height * pictureScale;
   if (pictureW != w || pictureH != h) {
     picture.Reset(), staging.Reset(), pictureUav.Reset(), pictureSrv.Reset();
@@ -2288,6 +2643,7 @@ void GsGpu::Impl::mark(int work) {
   }
   ctx->End(s.queries[n].Get());
   s.works.push_back(work);
+  s.labels.push_back(work == kFast ? runLabel : 0);
 }
 
 void GsGpu::Impl::frameTimer() {
@@ -2309,6 +2665,7 @@ void GsGpu::Impl::frameTimer() {
       if (i && !dj.Disjoint) {
         const double ms = double(at - prev) * 1000.0 / double(dj.Frequency);
         workMs[s.works[i - 1]] += ms;
+        if (s.labels[i - 1]) labelMs[size_t(s.labels[i - 1])] += ms;
         if (s.works[i - 1] != kIdle) busy += ms;
       }
       prev = at;
@@ -2317,6 +2674,7 @@ void GsGpu::Impl::frameTimer() {
     maxBusyMs = std::max(maxBusyMs, busy);
     ++gpuFrames;
     s.works.clear();
+    s.labels.clear();
     s.pending = false;
   }
   static const bool report = std::getenv("CODPORT_GPU_TIME") != nullptr;
@@ -2467,6 +2825,7 @@ void GsGpu::present(const Gs::Display& d, uint64_t stamp) {
   const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
   const double at = stamp ? double(stamp) * 1e-9 : now, gap = at - m.stampB;
   if (gap > 0.005 && gap < 0.1) m.frameSeconds += (gap - m.frameSeconds) * 0.05;
+  if (gap > 0.005 && gap < 0.25) m.paceSeconds += (gap - m.paceSeconds) * 0.05;
   if (m.presents++ % 60 == 0) {  // the screen's refresh rate, now and then (the window may have moved)
     MONITORINFOEXW mi{};
     mi.cbSize = sizeof(mi);
@@ -2479,7 +2838,16 @@ void GsGpu::present(const Gs::Display& d, uint64_t stamp) {
   const double gameHz = m.frameSeconds > 1 / 55.0 ? 50.0 : 59.94;  // PAL or NTSC
   // Interpolation: on a screen at least half again as fast as the game, unless the game is
   // outrunning real time (fast loading), when the pictures are shown as they come.
-  const bool interpolate = settings().interpolation && m.playing && m.refreshThread.joinable() && m.refreshHz >= gameHz * 1.5 && gap > 0.011 && m.generator();
+  if (m.interpolating && !m.interpolationTooSlow) {
+    m.slowFrames = m.paceSeconds > 1 / 45.0 ? m.slowFrames + 1 : 0;
+    if (m.slowFrames > 90) {
+      m.interpolationTooSlow = true;
+      std::printf("interpolation off: the graphics card cannot keep up with it at %ux (the game ran at %.0f frames a second)\n", m.scale,
+                  1 / m.paceSeconds);
+    }
+  }
+  const bool interpolate = settings().interpolation && !m.interpolationTooSlow && m.playing && m.refreshThread.joinable() &&
+                           m.refreshHz >= gameHz * 1.5 && gap > 0.011 && m.generator();
   m.fps = fpsText(interpolate ? m.refreshHz / gameHz : 1);
   if (interpolate) {
     m.view.narrow = narrowing(pictureAspect());

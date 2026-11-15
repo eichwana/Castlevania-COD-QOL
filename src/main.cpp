@@ -39,6 +39,7 @@
 #include "game/minimap.h"
 #include "game/speedrun.h"
 #include "host/discord.h"
+#include "host/hang_report.h"
 #include "host/pcsx2_saves.h"
 #include "game/mouse_camera.h"
 #include "game/sprint.h"
@@ -268,6 +269,7 @@ int main(int argc, char** argv) {
   // here or above, else the player picks it (and it is saved for next time).
   const fs::path exeDir = fs::absolute(argv[0]).parent_path();
   const fs::path settingsFile = (exeDir.filename() == "build" ? exeDir.parent_path() : exeDir) / "codport.ini";
+  startCrashReport(settingsFile.parent_path());  // falha-<date>.txt if the program fails
   auto fromUtf8 = [](const std::string& s) { return fs::path(std::u8string(s.begin(), s.end())); };
   if (!saveTransfer.second.empty()) {
     setMemcardFolder((exeDir.filename() == "build" ? exeDir.parent_path() : exeDir) / "memcard");
@@ -513,6 +515,8 @@ int main(int argc, char** argv) {
     if (recording.is_open() && settings().stickCameraSpeed != 100) recording << "camera-speed " << settings().stickCameraSpeed << '\n';
     if (!existed) settings().save();
     window.create(L"Castlevania: Curse of Darkness", settings().windowWidth, settings().windowHeight);
+    setWhileWaiting(answerSentMessages);  // this thread owns the window and waits for the drawing ones
+    startHangWatch(window.handle(), settingsFile.parent_path());
     if (replayFile.empty()) startUpdateCheck();
     speakers.open(Spu2::kSampleRate);
   }
@@ -569,6 +573,7 @@ int main(int argc, char** argv) {
     const uint64_t n = mem.hw.frames;
     sif.vblank();
     samplerFrame(n);
+    hangWatchBeat();
     if (peekEvery && n % peekEvery == 0 && !peeks.empty()) {
       std::printf("peek %llu:", (unsigned long long)n);
       for (uint32_t addr : peeks) std::printf(" %08X", mem.read<uint32_t>(addr));
@@ -713,6 +718,7 @@ int main(int argc, char** argv) {
         if (freezeIn > 0 && --freezeIn == 0) {
           gfx.drain();
           setPhotoMode(true);
+          hangWatchPause(true);
           bool open = true;
           for (int shown = 0; (open = window.pump()) && !takePhotoToggle(); ++shown) {
             if (testPhoto && shown == 10) requestScreenshot(exeDir / "shots" / "photo.png");
@@ -721,6 +727,7 @@ int main(int argc, char** argv) {
             std::this_thread::sleep_for(std::chrono::milliseconds(15));
           }
           setPhotoMode(false);
+          hangWatchPause(false);
           gfx.gs.hideHud = false;
           wallStart = std::chrono::steady_clock::now() - std::chrono::microseconds(mem.hw.cycles * 1000000 / Hardware::kEeHz);
           if (!open) cpu.halt(StopReason::Exit, "window closed");

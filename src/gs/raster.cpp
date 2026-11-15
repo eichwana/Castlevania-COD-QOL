@@ -417,10 +417,21 @@ void Gs::sync() {
 }
 
 void Gs::drawPrimitive() {
+  // (Cs - Cd) * As >> 7 + Cd with As 128 at every vertex (its colour's, no texture alpha) is Cs: no
+  // blend. The game copies its picture so; the GPU renderer then needs no copy of the destination.
+  auto unblendOpaque = [](Command& c) {
+    const Draw& d = c.d;
+    if (!d.blend || d.pabe || d.ba != 0 || d.bb != 1 || d.bc != 0 || d.bd != 1 || (d.tme && d.tcc)) return;
+    const uint32_t n = c.type == 6 || c.type == 1 || c.type == 2 ? 2 : c.type >= 3 ? 3 : 1;
+    for (uint32_t k = c.type == 6 || !d.iip ? n - 1 : 0; k < n; ++k)  // (flat: the last vertex's colour)
+      if (c.v[k].a != 128) return;
+    c.d.blend = false;
+  };
   ++primitives;
   flushSteps();
   if (!drawDirty_ && !batch_.empty()) {  // the state of the last primitive, in this batch
     batch_.push_back({*lastDraw_, {queue_[0], queue_[1], queue_[2]}, uint32_t(bits(prim_, 0, 3))});
+    unblendOpaque(batch_.back());
     if (batch_.size() >= 16384) flush();
     return;
   }
@@ -440,6 +451,9 @@ void Gs::drawPrimitive() {
   d.ztest = bits(test, 16, 1);
   d.ztst = bits(test, 17, 2);
   d.zwrite = d.ztest && !bits(zbuf, 32, 1);
+  // Depth that always passes and is not written is never touched: no depth buffer, so a frame drawn
+  // where that buffer lies (a 16-bit filter of the picture over it) is no overlap.
+  if (d.ztest && d.ztst == 1 && !d.zwrite) d.ztest = false;
   d.ate = bits(test, 0, 1);
   d.atst = bits(test, 1, 3);
   d.aref = int(bits(test, 4, 8));
@@ -537,6 +551,7 @@ void Gs::drawPrimitive() {
   if (d.tme && std::find_if(read_.begin(), read_.end(), [&](const Range& r) { return r.lo == tex.lo && r.hi == tex.hi; }) == read_.end())
     read_.push_back(tex);
   batch_.push_back({d, {queue_[0], queue_[1], queue_[2]}, uint32_t(bits(prim_, 0, 3))});
+  unblendOpaque(batch_.back());
   if (!lastDraw_) lastDraw_ = std::make_unique<Draw>();
   *lastDraw_ = d;
   drawDirty_ = false;

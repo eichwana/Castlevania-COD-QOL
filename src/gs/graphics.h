@@ -3,6 +3,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
+#include <chrono>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -19,6 +20,15 @@
 
 class Hardware;
 class Memory;
+
+// What the window's own thread does while it waits here for the drawing threads, a few times a
+// second (set from that thread; others wait plainly): it answers the messages Windows sends it.
+// DXGI sends the window messages from inside Present on the drawing thread at times (going in and
+// out of independent flip in full screen), and waits for the answer: with the window's thread only
+// waiting for that same drawing thread, both waited forever and Windows closed the game as not
+// responding.
+void setWhileWaiting(std::function<void()> answer);
+bool whileWaiting();  // runs it if this is its thread; false otherwise
 
 // A thread that works through commands handed to it in order. One producer thread collects
 // them (post) and hands them over in batches (publish); each command is a header and its data.
@@ -42,7 +52,12 @@ public:
   template <class Ready>
   void waitUntil(Ready ready) {  // checked whenever a batch is done
     std::unique_lock lock(mutex_);
-    idle_.wait(lock, ready);
+    while (!idle_.wait_for(lock, std::chrono::milliseconds(5), ready)) {
+      lock.unlock();
+      const bool answered = whileWaiting();
+      lock.lock();
+      if (!answered) return idle_.wait(lock, ready);  // not the window's thread: just wait
+    }
   }
   double cpuSeconds();
   // `tick` runs on the thread once per nudge(), between batches (any thread may nudge). Setting it

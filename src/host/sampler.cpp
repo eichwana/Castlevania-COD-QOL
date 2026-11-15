@@ -54,6 +54,7 @@ void loop() {
 }  // namespace
 
 void sampleThisThread(const std::string& name) {
+  SetThreadDescription(GetCurrentThread(), std::wstring(name.begin(), name.end()).c_str());  // named in hang reports too
   if (!enabled()) return;
   HANDLE handle;
   DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &handle, 0, FALSE, DUPLICATE_SAME_ACCESS);

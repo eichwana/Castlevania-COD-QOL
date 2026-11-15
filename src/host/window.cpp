@@ -445,6 +445,11 @@ void* currentThreadHandle() { return OpenThread(THREAD_QUERY_LIMITED_INFORMATION
 
 int windowClientHeight() { return gClientH; }
 
+void answerSentMessages() {
+  MSG msg;
+  PeekMessageW(&msg, nullptr, 0, 0, PM_NOREMOVE);  // looks only: also tells Windows the window is alive
+}
+
 void showWarning(const wchar_t* text) { MessageBoxW(nullptr, text, L"Castlevania: Curse of Darkness", MB_OK | MB_ICONWARNING); }
 
 PhotoView photoView() {

@@ -17,6 +17,7 @@
 #include "game/achievements.h"
 #include "host/audio.h"
 #include "host/gamepad.h"
+#include "host/hang_report.h"
 #include "host/pcsx2_saves.h"
 #include "host/update_check.h"
 #include "host/settings.h"
@@ -771,6 +772,7 @@ void showControlsDialog(void* ownerHandle) {
   }();
   if (!registered || gDialog) return;
   stopRumble();  // the game waits while this window is open
+  hangWatchPause(true);
   Dialog dialog;
   gDialog = &dialog;
   dialog.owner = owner;
@@ -810,4 +812,5 @@ void showControlsDialog(void* ownerHandle) {
   }
   EnableWindow(owner, TRUE);
   SetForegroundWindow(owner);
+  hangWatchPause(false);
 }

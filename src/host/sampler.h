@@ -6,6 +6,6 @@
 // sampleThisThread() are interrupted about every millisecond and their instruction pointers
 // counted; samplerReport() lists the hottest source lines per thread name (needs the PDB).
 // CODPORT_SAMPLE=N starts sampling at frame N (samplerFrame is told each frame).
-void sampleThisThread(const std::string& name);
+void sampleThisThread(const std::string& name);  // also names the thread (hang reports)
 void samplerFrame(uint64_t frame);
 void samplerReport();

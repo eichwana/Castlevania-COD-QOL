@@ -71,10 +71,25 @@ void WorkThread::publish() {
   wake_.notify_one();
 }
 
+namespace {
+std::function<void()> gWhileWaiting;
+std::thread::id gWaitingThread;
+}  // namespace
+
+void setWhileWaiting(std::function<void()> answer) {
+  gWhileWaiting = std::move(answer);
+  gWaitingThread = std::this_thread::get_id();
+}
+
+bool whileWaiting() {
+  if (!gWhileWaiting || std::this_thread::get_id() != gWaitingThread) return false;
+  gWhileWaiting();
+  return true;
+}
+
 bool WorkThread::wait() {
-  std::unique_lock lock(mutex_);
-  if (done_ == published_) return false;
-  idle_.wait(lock, [&] { return done_ == published_; });
+  if (std::unique_lock lock(mutex_); done_ == published_) return false;
+  waitUntil([&] { return done_ == published_; });
   return true;
 }
 
