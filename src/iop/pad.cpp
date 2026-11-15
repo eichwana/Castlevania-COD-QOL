@@ -6,6 +6,7 @@
 #include "ee/cpu.h"
 
 PadInput gPadInput;
+PadRumble gPadRumble;
 
 namespace {
 // Request/reply block (0x80 bytes): word 0 is the command, the rest depends on it.
@@ -30,6 +31,24 @@ uint32_t rd32(Sif& sif, uint32_t a) {
   return v;
 }
 void wr32(Sif& sif, uint32_t a, uint32_t v) { std::memcpy(sif.iop(a, 4), &v, 4); }
+
+// The motors from the actuator data the EE sends (SIF DMA to the buffer kOpen gave): two 0x20-byte
+// records written in turn, each {count, 1, 6, 6 bytes of data}; the newer count wins.
+PadRumble rumble(Sif& sif, uint32_t actuators, const uint8_t align[6]) {
+  const uint8_t* b = static_cast<const uint8_t*>(sif.iop(actuators, 0x40));
+  uint32_t count[2], length[2];
+  std::memcpy(&count[0], b, 4), std::memcpy(&count[1], b + 0x20, 4);
+  std::memcpy(&length[0], b + 8, 4), std::memcpy(&length[1], b + 0x28, 4);
+  const int newer = int32_t(count[1] - count[0]) > 0 ? 1 : 0;
+  PadRumble r;
+  if (length[newer] != 6) return r;
+  const uint8_t* data = b + newer * 0x20 + 0xC;
+  for (int i = 0; i < 6; ++i) {
+    if (align[i] == 0) r.smallMotor = r.smallMotor || data[i] != 0;
+    if (align[i] == 1) r.largeMotor = data[i];
+  }
+  return r;
+}
 
 class PadServer : public Sif::RpcServer {
 public:
@@ -57,6 +76,7 @@ public:
       }
       case kClose:
         if (port < 2) ports_[port].open = false;
+        if (port == 0) gPadRumble = {};
         wr32(sif, buf + 0xC, 1);
         break;
       case kSetMainMode:  // {cmd, port, slot, mode, lock}
@@ -67,7 +87,8 @@ public:
         if (port < 2) pressure_[port] = rd32(sif, buf + 0xC) != 0;
         wr32(sif, buf + 0x10, 1);
         break;
-      case kSetActAlign:
+      case kSetActAlign:  // {cmd, port, slot, 6 bytes}: per byte of the actuator data, its motor (0 small, 1 large, 0xFF none)
+        if (port < 2) std::memcpy(ports_[port].align, sif.iop(buf + 0xC, 6), 6);
         wr32(sif, buf + 0x14, 1);
         break;
       case kSetVref:
@@ -86,6 +107,7 @@ public:
     lastFrame_ = frame;
     for (uint32_t p = 0; p < 2; ++p)
       if (ports_[p].open) update(sif, p);
+    if (ports_[0].open && ports_[0].actuators) gPadRumble = rumble(sif, ports_[0].actuators, ports_[0].align);
   }
 
 private:
@@ -136,6 +158,7 @@ private:
     uint32_t area = 0;
     uint32_t frame = 0;
     uint32_t actuators = 0;
+    uint8_t align[6] = {0, 1, 0xFF, 0xFF, 0xFF, 0xFF};
   };
   Port ports_[2];
   bool analog_[2] = {}, pressure_[2] = {};

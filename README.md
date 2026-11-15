@@ -22,21 +22,33 @@ The port is made with the help of AI (Anthropic's Claude). Every change is teste
 
 ## What This Port Adds
 
-- **Higher internal resolution** - the game is drawn at 2x, 3x or 4x the PS2's resolution, including effects that reuse what was drawn (glow, shadows), which stay sharp too.
-- **Widescreen** - 16:9 shows more of the scene at the sides instead of stretching it; movies fill the screen and the HUD keeps its proportions. 4:3 is still available (**F10**).
+- **Higher internal resolution** - the game is drawn at 2x to 6x the PS2's resolution (6x takes about 1.5 GB of video memory in the heaviest scenes measured), including effects that reuse what was drawn (glow, shadows), which stay sharp too.
+- **Widescreen** - 16:9 shows more of the scene at the sides instead of stretching it; movies fill the screen and the HUD keeps its proportions. 4:3 is still available, and on ultrawide screens (21:9, 32:9) the picture can open up to the screen's width, the HUD and movies kept in proportion (**F10**, **F1**).
 - **Texture filtering** - surfaces are smoothed the way the PS2 itself draws them, through a cache of decoded textures sampled by the graphics card, at no cost in frame rate.
 - **Minimap** - a map of the current area in the top right corner, taken from the game's own map screen, with a frame in the game's style. It only shows during play, never in menus or cutscenes (**F8**).
 - **Sprint** - pressing **L3** while running makes Hector run faster, with its own pose: the torso leans forward, the strides lengthen and the arms swing wider.
 - **Attacks turn to the target** - with an enemy locked on, attacks turn toward it.
 - **Fast loading** - doors and Loading screens no longer wait for real time. The music pauses during them.
+- **Fast opening** - at boot, the memory card check and the KONAMI logo, which no button skips, go by at once.
 - **Settings menu** - **F1** opens a window with every action of the game to remap to a key or controller button, and all of the options above, each of which can be turned off. It is in English or Portuguese, chosen in the window itself (by default, the language of Windows).
 - **Any screen size** - full screen at the monitor's own resolution, or a window sized for 1080p, 1440p, 4K or ultrawide screens, the picture kept in proportion with black bars.
 - **Keyboard and Xbox controller** - XInput controllers work out of the box, and an optional frame counter shows performance (**F9**).
 - **Interpolation (optional)** - the port's own way to run above 60 frames per second: on screens of 100 Hz or more, a picture is made for every refresh of the screen between the game's own, from the motion between them (guided by the camera's turn and by depth, so Hector and the characters in front stay solid instead of ghosting), and the game shows at 120, 144 or 240 frames per second while its logic stays at 60. It works only during play: menus, movies and conversations are shown as they are. It is off by default (**F1**): it shows the game about one frame later, and fast-changing moments (explosions, scene cuts) can show small flaws.
 - **Texture packs** - the game's textures can be saved and replaced by new ones at any resolution, and `Texture Pack Mod.exe` installs a pack from its `.zip` or folder, saying first what it replaces (see [Texture Packs](#texture-packs)).
 - **Screenshots** - **F12** saves the window as shown (without the frame counter) as a PNG in the `screenshots` folder.
+- **Xbox button icons** - the game's prompts show A, B, X, Y, LB, RB, LT and RT (drawn for the port) in place of the PS2's symbols, where the controller defaults put them (cross is A, circle B, square X, triangle Y). Turned off in **F1**, they go back to the PS2's at the next screen.
+- **Brightness and volume** - in **F1**: the picture's brightness (70% to 150%) and the sound's volume.
+- **Controller vibration** - the controller vibrates where the game makes the DualShock 2 vibrate (Xbox controllers, DualShock 4, DualSense).
 - **Linux and Steam Deck** - a version that runs through Proton, with its own setup (see [Linux and Steam Deck](#linux-and-steam-deck-untested); done, but untested on a Deck).
-- **Keyboard and mouse** - W/A/S/D move Hector, the mouse turns the camera directly (no lag, its sensitivity and an inverted vertical axis in **F1**), and its left and right buttons attack. A click in the window holds the cursor there; **Esc** lets it go.
+- **Keyboard and mouse** - W/A/S/D move Hector, the mouse turns the camera directly (no lag, its sensitivity and each axis inverted on its own in **F1**), and its left and right buttons attack. A click in the window holds the cursor there; **Esc** lets it go.
+- **Speedrun timer** - the game's time since it was started or loaded, without the loads between places, under the minimap (**F7**). [LiveSplit](https://livesplit.org) can follow it through its TCP server (right click > Control > Start TCP Server): it starts with the game, takes this time as its Game Time, splits the first time each story area is entered and resets at the title.
+- **Achievements** - 18 milestones read from the game itself (each story area and the two side towers reached, levels 10 to 99, gold), with a short notice at the bottom of the screen during play. They are kept in `conquistas.txt`; the list is in **F1** > Extras.
+- **Discord** - shows on Discord the area Hector is in and his level (needs the Discord app open).
+- **PCSX2 saves** - **F1** > Extras brings this game's save from a PCSX2 memory card (`.ps2` or a folder card) into the port, or takes the port's to a PCSX2 folder card. A save already in its place is kept in a `backup` folder inside `memcard` first. Only the European version's saves (BESLES-53755); the American and Japanese ones are not read by this version.
+- **Picture options** - in **F1** > Picture and sound: FXAA anti-aliasing, sharpening, an anisotropic texture filter (distant floors and walls at an angle shimmer less), a tube TV filter (scanlines and a colour mask), colours for protanopia, deuteranopia and tritanopia, and the HUD's size (80% to 125%: each part grows or shrinks from its own corner).
+- **Photo mode** - **F6** freezes the game without its HUD or the port's overlays; the mouse wheel (or +/-) zooms, the arrows, W/A/S/D or dragging move around, **F12** saves, **F6** or **Esc** go back.
+- **Screen and sound** - an option for G-Sync and FreeSync screens (each picture shown when it is ready), a low-latency option (the controls read just before each frame), the sound output device, and 5.1 sound: with the game's sound on Pro Logic II, the port decodes it into six channels.
+- **The window remembers its place** - it opens where it was closed, on the same screen.
 
 ## Required Game Version
 
@@ -109,6 +121,7 @@ The port is a Windows program, and on Linux it runs through Proton, as Steam run
    - compiles the four parts of the game's code, as `Setup.exe` does, using every core (several minutes on the Deck). It can be stopped and run again: it goes on where it was.
 4. In Steam: **Games > Add a Non-Steam Game to My Library**, browse to `build/codport.exe` and add it. In its **Properties > Compatibility**, tick **Force the use of a specific Steam Play compatibility tool** and pick **Proton Experimental** (or Proton 9 or newer).
 5. Play it from Steam, also in Game Mode. The Deck's controls reach the game as an Xbox controller.
+6. Suggested controls: in the game's **Controller Settings** on the Deck, choose Steam's own **Gamepad with Mouse Trackpad** template (the right trackpad moves the mouse, which turns the camera once a tap on the screen has the game hold it; **Camera with the mouse** must be on in **F1**). Then, in **Back Grips**, set **L4** or **R4** to **Left Stick Click** (L3, the port's sprint).
 
 Notes for the Deck: the graphics card path needs rasterizer ordered views, which Proton (DXVK) offers on the Deck's driver from Mesa 23.2 on (current SteamOS has it); without them the game draws on the processor, too slowly to play. The shaders come compiled in `build/shaders.bin`, so Proton's HLSL compiler is not needed. 1x or 2x resolution suits the Deck's screen; on the 90 Hz screen of the OLED model the interpolation can be turned on in **F1** (Steam + X opens the keyboard). Texture packs are installed by hand: their PNG files go in `textures/replace`.
 
@@ -137,6 +150,10 @@ Notes for the Deck: the graphics card path needs rasterizer ordered views, which
 
 **A** jump, **X** attack, **B** final attack, **Y** Innocent Devil ability, **RB** guard, **RT** lock on, **LT** change target, **LB** reset camera, **LS** (left stick click) sprint, **Back** map, **Start** menu.
 
+Xbox (XInput) controllers work as they are, and vibrate where the game makes the DualShock 2 vibrate (hits, falls; it can be turned off in **F1**). A **DualShock 4** or **DualSense** works too, by USB or Bluetooth, without Steam or DS4Windows: its buttons take the Xbox ones' places (cross is A, circle B, square X, triangle Y, Share/Create Back, Options Start), as the **F1** window lists them; the touchpad is not used. With Steam Input or DS4Windows on, the controller they make is used instead.
+
+The **F1** window's **Controls** tab also sets the sticks' dead zone, how fast the right stick turns the camera (50% to 300% of the game's speed; above 100% it turns faster than the game ever does) and whether the camera's axes are reversed on the controller.
+
 ### Shortcuts
 
 | Key | What it does |
@@ -147,10 +164,14 @@ Notes for the Deck: the graphics card path needs rasterizer ordered views, which
 | **F10** | 4:3 or 16:9 |
 | **F9** | Frame counter |
 | **F8** | Minimap |
+| **F7** | Speedrun timer |
+| **F6** | Photo mode |
 
 ## Settings
 
 Everything in the **F1** window is saved at once in `codport.ini`, next to the `memcard` folder, which is created the first time the game starts and can also be edited by hand. Every option changes at once, the internal resolution included, with no need to start the game again; **Save** closes the window.
+
+When the game opens it asks GitHub whether a newer version of the port is out (only the project's public release page is read; nothing about you is sent). If one is, the window's title says so and the **F1** window has a button to download it; `Setup.exe` says so too. It can be turned off in **F1** (`avisar_versao_nova=0`).
 
 Saves go to the `memcard` folder. Each session is also recorded in `build/recordings` (inputs, clock and a copy of the memory card) and plays back exactly with `codport --replay <file>`; this is meant for testing, and the folder can be deleted.
 
@@ -182,7 +203,6 @@ Only textures the game loads from the disc can be replaced, not pictures it draw
 - Windows only, apart from Linux and the Steam Deck through Proton, untested.
 - Fast loading skips the sound of those moments: the music pauses and the door's sound is not heard. It can be turned off in **F1**.
 - During the sprint the feet can slide slightly on the ground, since the strides are longer than the game's animation.
-- Ultrawide screens show the 16:9 picture with black bars at the sides.
 
 ## Ideas and Problems
 
@@ -226,21 +246,33 @@ O port é feito com a ajuda de IA (o Claude, da Anthropic). Cada alteração é 
 
 ## O Que Este Port Acrescenta
 
-- **Resolução interna maior** - o jogo é desenhado em 2x, 3x ou 4x a resolução do PS2, inclusive os efeitos que reaproveitam o que foi desenhado (brilho, sombras), que também ficam nítidos.
-- **Widescreen** - em 16:9 a câmera mostra mais dos lados em vez de esticar a imagem; os vídeos preenchem a tela e a HUD mantém a proporção. O 4:3 continua disponível (**F10**).
+- **Resolução interna maior** - o jogo é desenhado de 2x a 6x a resolução do PS2 (o 6x usa uns 1,5 GB de memória de vídeo nas cenas mais pesadas medidas), inclusive os efeitos que reaproveitam o que foi desenhado (brilho, sombras), que também ficam nítidos.
+- **Widescreen** - em 16:9 a câmera mostra mais dos lados em vez de esticar a imagem; os vídeos preenchem a tela e a HUD mantém a proporção. O 4:3 continua disponível, e em telas ultrawide (21:9, 32:9) a imagem pode abrir até a largura da tela, com a HUD e os vídeos na proporção (**F10**, **F1**).
 - **Filtro de textura** - as superfícies são suavizadas como o próprio PS2 desenha, por um cache de texturas decodificadas lidas pela placa de vídeo, sem custo de quadros por segundo.
 - **Minimapa** - um mapa da área atual no canto superior direito, tirado da própria tela de mapa do jogo, com moldura no estilo do jogo. Aparece só durante o jogo, nunca em menus ou cenas (**F8**).
 - **Sprint** - apertar **L3** enquanto corre faz o Hector correr mais rápido, com pose própria: o tronco inclina, as passadas ficam mais longas e os braços balançam mais.
 - **Ataques no alvo** - com um inimigo travado, os ataques viram na direção dele.
 - **Carregamento rápido** - portas e telas de Loading não esperam mais o tempo real. A música pausa durante eles.
+- **Abertura rápida** - ao abrir o jogo, a checagem do cartão de memória e o logo da KONAMI, que nenhum botão pula, passam na hora.
 - **Menu de configurações** - o **F1** abre uma janela com todas as ações do jogo para trocar a tecla ou o botão do controle, e todas as opções acima, cada uma podendo ser desligada. Ela fica em português ou inglês, escolhido na própria janela (por padrão, o idioma do Windows).
 - **Qualquer tamanho de tela** - tela cheia na resolução do próprio monitor, ou janela em tamanhos para telas 1080p, 1440p, 4K ou ultrawide, com a imagem mantida na proporção por barras pretas.
 - **Teclado e controle Xbox** - controles XInput funcionam direto, e um contador de quadros opcional mostra o desempenho (**F9**).
 - **Interpolação (opcional)** - o jeito do próprio port de rodar acima de 60 quadros por segundo: em telas de 100 Hz ou mais, uma imagem é feita para cada atualização da tela entre as do jogo, a partir do movimento entre elas (guiado pelo giro da câmera e pela profundidade, para que o Hector e os personagens na frente fiquem sólidos em vez de deixar fantasma), e o jogo aparece a 120, 144 ou 240 quadros por segundo enquanto a lógica continua a 60. Funciona só durante o jogo: menus, filmes e conversas aparecem como são. Vem desligada (**F1**): mostra o jogo cerca de um quadro depois, e momentos que mudam muito rápido (explosões, cortes de cena) podem ter pequenas falhas.
 - **Pacotes de texturas** - as texturas do jogo podem ser salvas e trocadas por novas em qualquer resolução, e o `Texture Pack Mod.exe` instala um pacote a partir do `.zip` ou da pasta, dizendo antes o que ele troca (veja [Pacotes de Texturas](#pacotes-de-texturas)).
 - **Capturas de tela** - o **F12** salva a janela como ela aparece (sem o contador de quadros) como PNG na pasta `screenshots`.
+- **Ícones de botão do Xbox** - os avisos do jogo mostram A, B, X, Y, LB, RB, LT e RT (desenhados para o port) no lugar dos símbolos do PS2, onde os padrões do controle os põem (X do PS2 é A, bola B, quadrado X, triângulo Y). Desligados no **F1**, os do PS2 voltam na próxima tela.
+- **Brilho e volume** - no **F1**: o brilho da imagem (70% a 150%) e o volume do som.
+- **Vibração do controle** - o controle vibra onde o jogo faz o DualShock 2 vibrar (controles de Xbox, DualShock 4, DualSense).
 - **Linux e Steam Deck** - uma versão que roda pelo Proton, com instalador próprio (veja [Linux e Steam Deck](#linux-e-steam-deck-não-testado); pronta, mas não testada num Deck).
-- **Teclado e mouse** - W/A/S/D movem o Hector, o mouse gira a câmera direto (sem atraso, com sensibilidade e vertical invertido no **F1**) e seus botões esquerdo e direito atacam. Um clique na janela prende o cursor nela; o **Esc** solta.
+- **Teclado e mouse** - W/A/S/D movem o Hector, o mouse gira a câmera direto (sem atraso, com sensibilidade e cada eixo invertido à parte no **F1**) e seus botões esquerdo e direito atacam. Um clique na janela prende o cursor nela; o **Esc** solta.
+- **Cronômetro de speedrun** - o tempo do jogo desde que ele foi começado ou carregado, sem os carregamentos entre lugares, embaixo do minimapa (**F7**). O [LiveSplit](https://livesplit.org) pode segui-lo pelo servidor TCP dele (botão direito > Control > Start TCP Server): começa junto com o jogo, usa esse tempo como Game Time, divide na primeira vez em cada área da história e zera no título.
+- **Conquistas** - 18 marcos lidos do próprio jogo (cada área da história e as duas torres à parte, níveis de 10 a 99, ouro), com um aviso curto embaixo na tela durante o jogo. Ficam em `conquistas.txt`; a lista está no **F1** > Extras.
+- **Discord** - mostra no Discord a área em que o Hector está e o nível dele (com o Discord aberto).
+- **Saves do PCSX2** - o **F1** > Extras traz o save deste jogo de um cartão de memória do PCSX2 (`.ps2` ou cartão em pasta) para o port, ou leva o do port para um cartão em pasta do PCSX2. O save que já estiver no lugar é guardado antes numa pasta `backup` dentro de `memcard`. Só saves da versão europeia (BESLES-53755); os da americana e da japonesa esta versão não lê.
+- **Opções de imagem** - no **F1** > Imagem e som: anti-aliasing FXAA, nitidez, filtro anisotrópico (chão e paredes em ângulo cintilam menos de longe), filtro de TV de tubo (linhas e máscara de cor), cores para protanopia, deuteranopia e tritanopia, e o tamanho da HUD (80% a 125%: cada parte cresce ou diminui a partir do seu canto).
+- **Modo de foto** - o **F6** congela o jogo sem a HUD nem os avisos do port; a roda do mouse (ou +/-) aproxima, as setas, W/A/S/D ou arrastar movem, o **F12** salva, **F6** ou **Esc** voltam.
+- **Tela e som** - uma opção para monitores G-Sync e FreeSync (cada imagem aparece quando fica pronta), baixa latência (os controles lidos logo antes de cada quadro), a saída de som e som 5.1: com o som do jogo em Pro Logic II, o port o decodifica em seis canais.
+- **A janela lembra o lugar** - abre onde foi fechada, na mesma tela.
 
 ## Versão Necessária do Jogo
 
@@ -313,6 +345,7 @@ O `Setup.exe` e o `Texture Pack Mod.exe` precisam do PowerShell e do Visual Stud
    - compila as quatro partes do código do jogo, como o `Setup.exe` faz, usando todos os núcleos (alguns minutos no Deck). Pode ser interrompido e rodado de novo: ele continua de onde parou.
 4. Na Steam: **Jogos > Adicionar um jogo não Steam à biblioteca**, procure o `build/codport.exe` e adicione. Em **Propriedades > Compatibilidade**, marque **Forçar o uso de uma ferramenta de compatibilidade específica do Steam Play** e escolha **Proton Experimental** (ou Proton 9 ou mais novo).
 5. Jogue pela Steam, também no Modo de Jogo. Os controles do Deck chegam ao jogo como um controle de Xbox.
+6. Controles sugeridos: nas **Configurações do controle** do jogo no Deck, escolha o modelo da própria Steam **Gamepad with Mouse Trackpad** (o trackpad direito move o mouse, que gira a câmera depois que um toque na tela faz o jogo prendê-lo; a **Câmera com o mouse** precisa estar ligada no **F1**). Depois, em **Botões traseiros**, ponha **L4** ou **R4** como **Clique do analógico esquerdo** (L3, a corrida do port).
 
 Notas para o Deck: o desenho na placa de vídeo precisa de *rasterizer ordered views*, que o Proton (DXVK) oferece no driver do Deck a partir do Mesa 23.2 (o SteamOS atual já tem); sem elas o jogo desenha no processador, devagar demais para jogar. Os shaders já vêm compilados no `build/shaders.bin`, então o compilador de HLSL do Proton não é necessário. Resolução 1x ou 2x combina com a tela do Deck; na tela de 90 Hz do modelo OLED a interpolação pode ser ligada no **F1** (Steam + X abre o teclado). Pacotes de texturas são instalados à mão: os PNG vão em `textures/replace`.
 
@@ -341,6 +374,10 @@ Notas para o Deck: o desenho na placa de vídeo precisa de *rasterizer ordered v
 
 **A** pular, **X** atacar, **B** golpe final, **Y** habilidade do Innocent Devil, **RB** defender, **RT** travar no alvo, **LT** trocar de alvo, **LB** centralizar a câmera, **LS** (apertar o analógico esquerdo) sprint, **Back** mapa, **Start** menu.
 
+Controles de Xbox (XInput) funcionam direto, e vibram onde o jogo faz o DualShock 2 vibrar (golpes, quedas; dá para desligar no **F1**). Um **DualShock 4** ou **DualSense** também funciona, por USB ou Bluetooth, sem Steam nem DS4Windows: os botões ficam no lugar dos do Xbox (X é A, bola B, quadrado X, triângulo Y, Share/Create Back, Options Start), como a janela do **F1** mostra; o touchpad não é usado. Com o Steam Input ou o DS4Windows ligados, vale o controle que eles criam.
+
+A aba **Controles** da janela do **F1** também ajusta a zona morta dos analógicos, a velocidade com que o analógico direito gira a câmera (50% a 300% da do jogo; acima de 100% ela gira mais rápido do que o jogo permite) e a inversão dos eixos da câmera no controle.
+
 ### Atalhos
 
 | Tecla | O que faz |
@@ -351,10 +388,14 @@ Notas para o Deck: o desenho na placa de vídeo precisa de *rasterizer ordered v
 | **F10** | 4:3 ou 16:9 |
 | **F9** | Contador de quadros |
 | **F8** | Minimapa |
+| **F7** | Cronômetro de speedrun |
+| **F6** | Modo de foto |
 
 ## Configurações
 
 Tudo na janela do **F1** é salvo na hora em `codport.ini`, ao lado da pasta `memcard`; o arquivo é criado na primeira vez que o jogo abre e também pode ser editado à mão. Todas as opções mudam na hora, inclusive a resolução interna, sem precisar abrir o jogo de novo; o **Salvar** fecha a janela.
+
+Ao abrir, o jogo pergunta ao GitHub se saiu uma versão nova do port (só a página pública de releases do projeto é lida; nada sobre você é enviado). Se saiu, o título da janela avisa e a janela do **F1** tem um botão para baixar; o `Setup.exe` também avisa. Dá para desligar no **F1** (`avisar_versao_nova=0`).
 
 Os saves ficam na pasta `memcard`. Cada sessão também é gravada em `build/recordings` (entradas, relógio e uma cópia do cartão de memória) e reproduz exatamente com `codport --replay <arquivo>`; isso serve para testes, e a pasta pode ser apagada.
 
@@ -386,7 +427,6 @@ Só dá para trocar texturas que o jogo carrega do disco, não imagens que ele m
 - Só Windows, fora Linux e Steam Deck pelo Proton, não testados.
 - O carregamento rápido pula o som desses momentos: a música pausa e o som da porta não toca. Ele pode ser desligado no **F1**.
 - Durante o sprint os pés podem deslizar um pouco no chão, porque as passadas são mais longas que as da animação do jogo.
-- Telas ultrawide mostram a imagem 16:9 com barras pretas nas laterais.
 
 ## Ideias e Problemas
 

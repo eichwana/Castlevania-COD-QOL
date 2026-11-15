@@ -270,9 +270,19 @@ void Graphics::setUiLayerChain(uint32_t start, uint32_t end, bool narrow) {
   dmac.vif1TagAt = [this](uint32_t at) {
     at &= 0x0FFFFFFFu;
     for (const auto& chain : uiChains_) {
-      if (at == chain[0]) vuThread_.post(kUiLayer, chain[2], nullptr, 0);
-      else if (at == chain[1]) vuThread_.post(kUiLayer, 0, nullptr, 0);
+      if (at == chain[0]) {
+        vuThread_.post(kUiLayer, chain[2], nullptr, 0);
+        uiTag_ = chain[2] != 0 && gs.hudScale.load(std::memory_order_relaxed) != 100 ? 0 : -1;
+        return;
+      }
+      if (at == chain[1]) {
+        vuThread_.post(kUiLayer, 0, nullptr, 0);
+        uiTag_ = -1;
+        return;
+      }
     }
+    // Inside the HUD layer, with the HUD resized: each chain tag starts a piece the GS groups by.
+    if (uiTag_ >= 0) vuThread_.post(kUiTag, uint64_t(++uiTag_), nullptr, 0);
   };
 }
 
@@ -295,7 +305,7 @@ void Graphics::vuWork(const WorkThread::Header& h, const u128* data) {
   switch (h.kind) {
     case kVif1Data: vif1.dmaWrite(data, h.qwc); break;
     case kVif1Tag: vif1.dmaTag(h.arg); break;
-    case kGifData: case kPrivWrite: case kFrame: case kUiLayer: gsThread_.post(h.kind, h.arg, data, h.qwc, h.addr); break;
+    case kGifData: case kPrivWrite: case kFrame: case kUiLayer: case kUiTag: gsThread_.post(h.kind, h.arg, data, h.qwc, h.addr); break;
   }
 }
 
@@ -306,6 +316,7 @@ void Graphics::gsWork(const WorkThread::Header& h, const u128* data) {
     case kGifData: gif.feed(3, data, h.qwc); break;
     case kPrivWrite: gs.writePriv(h.addr, h.arg); break;
     case kUiLayer: gs.setUiLayer(h.arg != 0); break;
+    case kUiTag: gs.setUiPiece(int(h.arg)); break;
     case kFrame:
       if (h.qwc) {
         uint64_t stamp;

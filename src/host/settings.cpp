@@ -183,18 +183,36 @@ void Settings::load(const std::filesystem::path& from) {
         int w = 0, h = 0;
         if (std::sscanf(value.c_str(), "%dx%d", &w, &h) == 2 && w >= 320 && h >= 240) windowWidth = w, windowHeight = h;
       }
-      if (key == "proporcao") wide = value == "16:9";
-      if (key == "resolucao") scale = std::clamp(std::atoi(value.c_str()), 1, 4);
+      if (key == "posicao_janela") {
+        int x = 0, y = 0;
+        if (std::sscanf(value.c_str(), "%d,%d", &x, &y) == 2) windowX = x, windowY = y;
+      }
+      if (key == "proporcao") wide = value == "16:9" || value == "ultrawide", ultrawide = value == "ultrawide";
+      if (key == "resolucao") scale = std::clamp(std::atoi(value.c_str()), 1, 6);
       if (key == "mostrar_fps") showFps = value == "1";
+      if (key == "brilho") brightness = std::clamp(std::atoi(value.c_str()) / 10 * 10, 50, 200);
+      if (key == "volume") volume = std::clamp(std::atoi(value.c_str()) / 10 * 10, 0, 100);
       if (key == "interpolacao") interpolation = value == "1";
+      if (key == "fxaa") fxaa = value == "1";
+      if (key == "taxa_variavel") variableRefresh = value == "1";
+      if (key == "tamanho_hud") hudScale = std::clamp(std::atoi(value.c_str()), 80, 125);
+      if (key == "baixa_latencia") lowLatency = value == "1";
+      if (key == "nitidez") sharpness = std::clamp(std::atoi(value.c_str()) / 10 * 10, 0, 100);
+      if (key == "filtro_crt") crt = value == "1";
+      if (key == "daltonismo") colourBlind = std::clamp(std::atoi(value.c_str()), 0, 3);
       if (key == "idioma" && (value == "pt" || value == "en")) language = value;
+      if (key == "avisar_versao_nova") checkUpdates = value == "1";
       continue;
     }
     if (section == "jogo") {
       if (key == "ataque_no_alvo") attackTurn = value == "1";
+      if (key == "vibracao") vibration = value == "1";
+      if (key == "icones_xbox") xboxIcons = value == "1";
       if (key == "corrida") sprint = value == "1";
       if (key == "filtro_textura") textureFilter = value == "1";
+      if (key == "filtro_anisotropico") anisotropy = std::clamp(std::atoi(value.c_str()), 0, 16);
       if (key == "carregamento_rapido") fastLoading = value == "1";
+      if (key == "abertura_rapida") fastOpening = value == "1";
       if (key == "minimapa") minimap = value == "1";
       if (key == "pacote_texturas") texturePack = value == "1";
       if (key == "salvar_texturas") dumpTextures = value == "1";
@@ -204,6 +222,27 @@ void Settings::load(const std::filesystem::path& from) {
       if (key == "camera_com_mouse") mouseCamera = value == "1";
       if (key == "sensibilidade") mouseSensitivity = std::clamp(std::atoi(value.c_str()), 1, 10);
       if (key == "inverter_vertical") invertMouseY = value == "1";
+      if (key == "inverter_horizontal") invertMouseX = value == "1";
+      continue;
+    }
+    if (section == "som") {
+      if (key == "dispositivo") audioDevice = value;
+      if (key == "surround_51") surround = value == "1";
+      continue;
+    }
+    if (section == "extras") {
+      if (key == "cronometro") speedrunTimer = value == "1";
+      if (key == "livesplit") liveSplit = value == "1";
+      if (key == "avisos_conquistas") achievementNotices = value == "1";
+      if (key == "discord") discord = value == "1";
+      if (key == "discord_id_aplicativo" && !value.empty()) discordClientId = value;
+      continue;
+    }
+    if (section == "controle_ajustes") {
+      if (key == "zona_morta") stickDeadZone = std::clamp(std::atoi(value.c_str()), 0, 50);
+      if (key == "velocidade_camera") stickCameraSpeed = std::clamp(std::atoi(value.c_str()), 50, 300);
+      if (key == "inverter_camera_horizontal") invertStickX = value == "1";
+      if (key == "inverter_camera_vertical") invertStickY = value == "1";
       continue;
     }
     for (int c = 0; c < kControls; ++c) {
@@ -223,19 +262,33 @@ void Settings::save() const {
          "# LS, RS, Cima, Baixo, Esquerda, Direita. Vazio = nenhuma.\n\n";
   out << "[disco]\n# A imagem do disco do jogo (SLES-53755); vazio = o primeiro .iso desta pasta ou de uma acima\niso=" << iso
       << "\n\n";
-  out << "[janela]\ntela_cheia=" << (fullscreen ? 1 : 0)
+  out << "[janela]\n# Ao abrir o jogo, pergunta ao GitHub se saiu uma versao nova do port (e avisa no titulo e no F1)\n"
+         "avisar_versao_nova=" << (checkUpdates ? 1 : 0) << "\ntela_cheia=" << (fullscreen ? 1 : 0)
       << "\n# Tamanho da janela fora da tela cheia, em pixels (em tela cheia vale o do monitor)\ntamanho_janela=" << windowWidth << 'x'
-      << windowHeight << "\nproporcao=" << (wide ? "16:9" : "4:3")
-      << "\n# Resolucao do desenho: 1 = a do PS2; 2, 3 ou 4 = tantas vezes mais nitida (pesa mais na placa de\n"
-         "# video)\nresolucao="
+      << windowHeight << "\n# Onde a janela estava (canto superior esquerdo, em pixels da area de trabalho); vazio = no meio da tela\nposicao_janela="
+      << (windowX == kNoPlace ? std::string() : std::to_string(windowX) + "," + std::to_string(windowY)) << "\n# Proporcao: 4:3, 16:9 ou ultrawide (tao larga quanto a tela, 21:9 ou 32:9)\nproporcao=" << (!wide ? "4:3" : ultrawide ? "ultrawide" : "16:9")
+      << "\n# Resolucao do desenho: 1 = a do PS2; 2 a 6 = tantas vezes mais nitida (pesa mais na placa de\n"
+         "# video; o 6x usa uns 1,5 GB de memoria de video nas cenas mais pesadas)\nresolucao="
       << scale << "\n# Quadros por segundo no canto superior direito (F9 liga e desliga)\nmostrar_fps=" << (showFps ? 1 : 0)
+      << "\n# Brilho da imagem em porcento (100 = como o jogo desenha; mais claro acima, mais escuro abaixo)\nbrilho=" << brightness
+      << "\n# Volume do som em porcento\nvolume=" << volume
       << "\n# Interpolação: quadros feitos entre os do jogo, em telas de 100 Hz ou mais (atrasa a imagem um pouco)\ninterpolacao="
       << (interpolation ? 1 : 0)
+      << "\n# Anti-aliasing FXAA: suaviza os serrilhados da imagem\nfxaa=" << (fxaa ? 1 : 0)
+      << "\n# Nitidez em porcento (0 = desligada)\nnitidez=" << sharpness << "\n# Filtro de TV de tubo (linhas e mascara)\nfiltro_crt=" << (crt ? 1 : 0)
+      << "\n# Cores para daltonismo: 0 = nenhum, 1 = protanopia, 2 = deuteranopia, 3 = tritanopia\ndaltonismo=" << colourBlind
+      << "\n# Monitor com G-Sync ou FreeSync: cada imagem aparece assim que fica pronta (em outros monitores rasga)\ntaxa_variavel="
+      << (variableRefresh ? 1 : 0) << "\n# Baixa latencia: os controles sao lidos logo antes de cada quadro do jogo\nbaixa_latencia=" << (lowLatency ? 1 : 0)
+      << "\n# Tamanho da HUD durante o jogo em porcento (80 a 125; cada parte cresce a partir do seu canto)\ntamanho_hud=" << hudScale
       << "\n# Idioma das opcoes e controles (F1): pt ou en / Language of the options and controls (F1): pt or en\nidioma=" << language
       << "\n\n[jogo]\n# Com um inimigo travado, os ataques viram para ele\nataque_no_alvo=" << (attackTurn ? 1 : 0)
+      << "\n# O controle vibra quando o jogo faz o DualShock 2 vibrar\nvibracao=" << (vibration ? 1 : 0)
+      << "\n# Icones de botao do Xbox (A, B, X, Y, LB...) no lugar dos do PS2 nos avisos do jogo\nicones_xbox=" << (xboxIcons ? 1 : 0)
       << "\n# L3 (apertar o analogico esquerdo) liga e desliga a corrida mais rapida\ncorrida=" << (sprint ? 1 : 0)
       << "\n# Texturas suavizadas como no PS2; 0 = pixels duros\nfiltro_textura=" << (textureFilter ? 1 : 0)
-      << "\n# Portas e telas de Loading sem esperar o tempo real; a musica e o som da porta somem\ncarregamento_rapido=" << (fastLoading ? 1 : 0)
+      << "\n# Filtro anisotropico: 2, 4, 8 ou 16 (o chao e as paredes em angulo cintilam menos de longe); 0 = como o PS2\nfiltro_anisotropico="
+      << anisotropy << "\n# Portas e telas de Loading sem esperar o tempo real; a musica e o som da porta somem\ncarregamento_rapido=" << (fastLoading ? 1 : 0)
+      << "\n# Abertura sem esperar: a checagem do cartao de memoria e o logo da KONAMI passam na hora\nabertura_rapida=" << (fastOpening ? 1 : 0)
       << "\n# Mapa no canto da tela (F8 liga e desliga)\nminimapa=" << (minimap ? 1 : 0)
       << "\n# Pacote de texturas: as imagens de textures\\replace no lugar das do jogo (vale ao abrir o jogo)\npacote_texturas="
       << (texturePack ? 1 : 0)
@@ -245,6 +298,18 @@ void Settings::save() const {
          "camera_com_mouse=" << (mouseCamera ? 1 : 0)
       << "\n# De 1 a 10\nsensibilidade=" << mouseSensitivity
       << "\n# 1 = empurrar o mouse para a frente olha para baixo\ninverter_vertical=" << (invertMouseY ? 1 : 0)
+      << "\n# 1 = mover o mouse para a direita gira a camera para a esquerda\ninverter_horizontal=" << (invertMouseX ? 1 : 0)
+      << "\n\n[controle_ajustes]\n# Zona morta dos analogicos em porcento (0 = a do XInput, 24 e 27)\nzona_morta=" << stickDeadZone
+      << "\n# Velocidade da camera no analogico direito, em porcento da do jogo (acima de 100, mais rapida que o jogo gira)\nvelocidade_camera="
+      << stickCameraSpeed << "\ninverter_camera_horizontal=" << (invertStickX ? 1 : 0) << "\ninverter_camera_vertical=" << (invertStickY ? 1 : 0)
+      << "\n\n[som]\n# Saida de som pelo nome (vazio = a padrao do Windows)\ndispositivo=" << audioDevice
+      << "\n# Som 5.1: o Pro Logic II do jogo (escolha Pro Logic II nas opcoes de som dele) aberto em 6 canais\nsurround_51=" << (surround ? 1 : 0)
+      << "\n\n[extras]\n# Cronometro de speedrun no canto (F7): o tempo do jogo desde que ele comecou, sem os carregamentos\ncronometro="
+      << (speedrunTimer ? 1 : 0)
+      << "\n# O LiveSplit segue o cronometro (ligue o LiveSplit Server nele: Control > Start TCP Server, porta 16834)\nlivesplit="
+      << (liveSplit ? 1 : 0) << "\n# Aviso na tela quando uma conquista do port e alcancada\navisos_conquistas=" << (achievementNotices ? 1 : 0)
+      << "\n# Mostrar no Discord a area e o nivel do Hector\ndiscord=" << (discord ? 1 : 0)
+      << "\n# Id do aplicativo do Discord (vazio = o do port)\ndiscord_id_aplicativo=" << (discordClientId == kDiscordClientId ? "" : discordClientId)
       << "\n\n[teclado]\n";
   for (int c = 0; c < kControls; ++c) out << id(c) << '=' << keyName(keys[c]) << '\n';
   out << "\n[controle]\n";

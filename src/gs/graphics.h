@@ -131,7 +131,9 @@ private:
     kFrame,               // both: a VBlank (arg: picture wanted), passed on
     kKick, kDirect,       // GS thread: PATH1 packets (XGKICK), PATH2 (VIF1 DIRECT)
     kUiLayer,             // both: the drawing that follows is the game's 2D layer (arg) or not, passed on
+    kUiTag,               // both: in the 2D layer, the drawing that follows is from the arg'th chain tag, passed on
   };
+  int uiTag_ = -1;  // the 2D layer's chain tags so far (DMA thread), -1 outside it or with the HUD's own size
   // Takes VIF1's or the GIF's DMA transfers for the queue.
   struct QueuedSink : DmaSink {
     QueuedSink(Graphics& g, Kind data) : g(g), data(data) {}

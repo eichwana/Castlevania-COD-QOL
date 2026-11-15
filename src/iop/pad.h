@@ -17,6 +17,16 @@ struct PadInput {
   float turnYaw = 0, turnPitch = 0;
 };
 extern PadInput gPadInput;
+
+// The controller's motors as the game sets them (libpad's actuator data, placed by
+// scePadSetActAlign): the small one on or off, the large one's strength (0-255). This game uses
+// only the large one. Set by the IOP each frame, on the emulation's thread.
+struct PadRumble {
+  bool smallMotor = false;
+  uint8_t largeMotor = 0;
+  bool operator==(const PadRumble&) const = default;
+};
+extern PadRumble gPadRumble;
 // Sets the buttons (pressure-sensitive ones fully pressed) and the sticks (left: bits 1 up, 2 down,
 // 4 left, 8 right; right: 16, 32, 64, 128; centred when none).
 void setPad(PadInput& pad, uint16_t buttons, uint8_t stick);

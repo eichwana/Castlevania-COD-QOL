@@ -18,7 +18,7 @@ class FrameGen {
   struct View {
     bool known = false;
     float yaw = 0, pitch = 0;  // radians
-    bool wide = false;          // 16:9
+    float narrow = 1;           // the game's horizontal field of view, as narrowed (0.75 at 16:9)
   };
   // `depth`: the game's depth buffer for it, if known (depthScale samples to a PS2 pixel; larger is nearer).
   // `sceneDepth`: the depth before the characters were drawn over the scene (Hector), if known.

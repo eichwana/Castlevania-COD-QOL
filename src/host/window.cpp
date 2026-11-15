@@ -3,6 +3,7 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
+#include <windowsx.h>
 #include <commdlg.h>
 #include <immintrin.h>
 #include <mmsystem.h>
@@ -10,6 +11,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstdio>
 #include <mutex>
 #include <string>
@@ -19,6 +21,7 @@
 #include "host/icon.h"
 #include "host/screenshot.h"
 #include "host/settings.h"
+#include "host/update_check.h"
 #include "iop/pad.h"
 
 namespace {
@@ -26,11 +29,29 @@ namespace {
 bool gHeld[256] = {};
 WINDOWPLACEMENT gWindowed = {sizeof(WINDOWPLACEMENT)};
 std::wstring gTitle;
+HWND gGameWindow = nullptr;
+std::atomic<int> gClientW{16}, gClientH{9};  // the game window's inside (WM_SIZE)
+std::mutex gPhotoMutex;
+PhotoView gPhoto;
+std::atomic<bool> gPhotoToggle{false};
+POINT gPhotoDrag{-1, -1};
+// Moves or zooms the photo view, keeping the picture on the screen.
+void photoMove(float dx, float dy, float zoomBy) {
+  std::lock_guard lock(gPhotoMutex);
+  if (!gPhoto.on) return;
+  gPhoto.zoom = std::clamp(gPhoto.zoom * zoomBy, 1.0f, 8.0f);
+  const float room = 0.5f - 0.5f / gPhoto.zoom;
+  gPhoto.x = std::clamp(gPhoto.x + dx / gPhoto.zoom, -room, room), gPhoto.y = std::clamp(gPhoto.y + dy / gPhoto.zoom, -room, room);
+}
+constexpr UINT kRefreshTitle = WM_APP + 41;
 
 // The title says which proportion is on and which keys change the picture and the settings.
 void updateTitle(HWND hwnd) {
-  const std::wstring mode = settings().wide ? L"16:9" : L"4:3";
-  SetWindowTextW(hwnd, (gTitle + L"  |  " + mode +
+  const std::wstring mode = !settings().wide ? L"4:3" : settings().ultrawide ? L"ultrawide" : L"16:9";
+  std::wstring notice;
+  if (const std::string v = newerVersion(); !v.empty())
+    notice = (english() ? L"  |  New version " : L"  |  Nova versão ") + std::wstring(v.begin(), v.end()) + (english() ? L" out (F1)" : L" disponível (F1)");
+  SetWindowTextW(hwnd, (gTitle + notice + L"  |  " + mode +
                         (english() ? L"  |  Alt+Enter: full screen  |  F10: 4:3 / 16:9  |  F9: FPS  |  F1: options and controls"
                                    : L"  |  Alt+Enter: tela cheia  |  F10: 4:3 / 16:9  |  F9: FPS  |  F1: opções e controles"))
                            .c_str());
@@ -111,13 +132,42 @@ void setKey(int vk, bool down) {
 
 LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
   switch (msg) {
+    case kRefreshTitle:
+      updateTitle(hwnd);
+      return 0;
     case WM_KEYDOWN: case WM_SYSKEYDOWN:
       if (wp == VK_F10) {
         if (!(lp & (1 << 30))) {
-          settings().wide = !settings().wide;
-          settings().save();
+          Settings& s = settings();
+          const bool wider = int64_t(gClientW) * 9 > int64_t(gClientH) * 16 + 9;
+          if (!s.wide) s.wide = true, s.ultrawide = false;
+          else if (!s.ultrawide && wider) s.ultrawide = true;
+          else s.wide = false, s.ultrawide = false;
+          s.save();
           updateTitle(hwnd);
           InvalidateRect(hwnd, nullptr, TRUE);
+        }
+        return 0;
+      }
+      if (wp == VK_F6) {  // photo mode
+        if (!(lp & (1 << 30))) gPhotoToggle = true;
+        return 0;
+      }
+      if (photoView().on) {  // in photo mode the keys move the view; the game is frozen
+        const float step = 0.04f;
+        if (wp == VK_LEFT || wp == 'A') photoMove(-step, 0, 1);
+        if (wp == VK_RIGHT || wp == 'D') photoMove(step, 0, 1);
+        if (wp == VK_UP || wp == 'W') photoMove(0, -step, 1);
+        if (wp == VK_DOWN || wp == 'S') photoMove(0, step, 1);
+        if (wp == VK_OEM_PLUS || wp == VK_ADD) photoMove(0, 0, 1.25f);
+        if (wp == VK_OEM_MINUS || wp == VK_SUBTRACT) photoMove(0, 0, 0.8f);
+        if (wp == VK_ESCAPE) gPhotoToggle = true;
+        if (wp != VK_F12) return 0;
+      }
+      if (wp == VK_F7) {  // the speedrun timer
+        if (!(lp & (1 << 30))) {
+          settings().speedrunTimer = !settings().speedrunTimer;
+          settings().save();
         }
         return 0;
       }
@@ -176,12 +226,29 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       break;
     // Mouse buttons are controls like keys, while the window holds the mouse (or the mouse does
     // not turn the camera); a click that makes the window hold it only does that.
+    case WM_MOUSEWHEEL:
+      if (photoView().on) photoMove(0, 0, GET_WHEEL_DELTA_WPARAM(wp) > 0 ? 1.15f : 1 / 1.15f);
+      return 0;
+    case WM_MOUSEMOVE:
+      if (photoView().on && (wp & MK_LBUTTON) && gPhotoDrag.x >= 0) {  // dragging the picture
+        const POINT at{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+        const float h = float(std::max(1, int(gClientH)));
+        photoMove(-float(at.x - gPhotoDrag.x) / h, -float(at.y - gPhotoDrag.y) / h, 1);
+        gPhotoDrag = at;
+        return 0;
+      }
+      break;
     case WM_LBUTTONDOWN: case WM_RBUTTONDOWN: case WM_MBUTTONDOWN:
+      if (photoView().on) {
+        gPhotoDrag = {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+        return 0;
+      }
       if (gMouseHeld || !settings().mouseCamera) setKey(mouseButton(msg), true);
       else holdMouse(hwnd, true);
       return 0;
     case WM_LBUTTONUP: case WM_RBUTTONUP: case WM_MBUTTONUP: setKey(mouseButton(msg), false); return 0;
     case WM_SIZE: case WM_MOVE:
+      if (msg == WM_SIZE && LOWORD(lp) && HIWORD(lp)) gClientW = LOWORD(lp), gClientH = HIWORD(lp);
       if (gMouseHeld) holdMouse(hwnd, true);  // the cursor's bounds follow the window
       break;
     case WM_SETCURSOR:
@@ -200,13 +267,15 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       }
       break;  // DefWindowProc cleans up
     }
-    case WM_EXITSIZEMOVE:  // resized by hand: that size next time
-      if ((GetWindowLongW(hwnd, GWL_STYLE) & WS_OVERLAPPEDWINDOW) && !IsZoomed(hwnd)) {
-        RECT rc;
+    case WM_EXITSIZEMOVE:  // resized or moved by hand: that size and place next time (on that screen)
+      if ((GetWindowLongW(hwnd, GWL_STYLE) & WS_OVERLAPPEDWINDOW) && !IsZoomed(hwnd) && !IsIconic(hwnd)) {
+        RECT rc, outer;
         GetClientRect(hwnd, &rc);
-        if (rc.right != settings().windowWidth || rc.bottom != settings().windowHeight) {
-          settings().windowWidth = rc.right, settings().windowHeight = rc.bottom;
-          settings().save();
+        GetWindowRect(hwnd, &outer);
+        Settings& s = settings();
+        if (rc.right != s.windowWidth || rc.bottom != s.windowHeight || outer.left != s.windowX || outer.top != s.windowY) {
+          s.windowWidth = rc.right, s.windowHeight = rc.bottom, s.windowX = outer.left, s.windowY = outer.top;
+          s.save();
         }
       }
       return 0;
@@ -260,6 +329,15 @@ void reportError(const std::string& message) {
   MessageBoxW(nullptr, text.c_str(), L"Castlevania: Curse of Darkness", MB_OK | MB_ICONERROR);
 }
 bool wideScreen() { return settings().wide; }
+
+Aspect pictureAspect() {
+  const Settings& s = settings();
+  if (!s.wide) return {4, 3};
+  const int w = gClientW, h = gClientH;
+  if (!s.ultrawide || h <= 0 || int64_t(w) * 9 <= int64_t(h) * 16) return {16, 9};
+  if (int64_t(w) * 9 > int64_t(h) * 32) return {32, 9};
+  return {w, h};
+}
 
 void setFullscreen(void* window, bool on) {
   HWND hwnd = static_cast<HWND>(window);
@@ -325,6 +403,10 @@ void setWindowSize(void* window, int width, int height) {
   SetWindowPos(hwnd, nullptr, r.left, r.top, r.right - r.left, r.bottom - r.top, SWP_NOZORDER | SWP_NOOWNERZORDER);
 }
 
+void refreshTitle() {
+  if (HWND hwnd = gGameWindow) PostMessageW(hwnd, kRefreshTitle, 0, 0);
+}
+
 void setWide(void* window, bool on) {
   settings().wide = on;
   settings().save();
@@ -360,6 +442,24 @@ void setWorkClocks(std::function<std::vector<double>()> clocks) {
 }
 
 void* currentThreadHandle() { return OpenThread(THREAD_QUERY_LIMITED_INFORMATION, FALSE, GetCurrentThreadId()); }
+
+int windowClientHeight() { return gClientH; }
+
+void showWarning(const wchar_t* text) { MessageBoxW(nullptr, text, L"Castlevania: Curse of Darkness", MB_OK | MB_ICONWARNING); }
+
+PhotoView photoView() {
+  std::lock_guard lock(gPhotoMutex);
+  return gPhoto;
+}
+bool takePhotoToggle() { return gPhotoToggle.exchange(false); }
+void setPhotoMode(bool on) {
+  {
+    std::lock_guard lock(gPhotoMutex);
+    gPhoto = PhotoView{on};
+    gPhotoDrag = {-1, -1};
+  }
+  if (on && gGameWindow) holdMouse(gGameWindow, false);  // the cursor drags the picture
+}
 
 std::string fpsText(double shownEach) {
   static LARGE_INTEGER frequency{}, since{};
@@ -405,13 +505,23 @@ bool Window::create(const wchar_t* title, int width, int height) {
   RegisterClassW(&wc);
   HWND hwnd = CreateWindowW(L"codport", title, WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 640, 480, nullptr, nullptr,
                             wc.hInstance, nullptr);
-  if (hwnd) {  // the size asked for, on the screen it opened on (smaller if it does not fit)
-    const RECT r = placed(hwnd, width, height);
+  if (hwnd) {  // the size asked for, where it was left if that is still on a screen, else centred on
+              // the screen it opened on (smaller if it does not fit)
+    const Settings& s = settings();
+    RECT r{};
+    const POINT corner{s.windowX + 40, s.windowY + 20};  // inside its title bar
+    if (s.windowX != Settings::kNoPlace && MonitorFromPoint(corner, MONITOR_DEFAULTTONULL)) {
+      const RECT frame = outerFor(width, height);
+      r = RECT{s.windowX, s.windowY, s.windowX + frame.right - frame.left, s.windowY + frame.bottom - frame.top};
+    } else {
+      r = placed(hwnd, width, height);
+    }
     SetWindowPos(hwnd, nullptr, r.left, r.top, r.right - r.left, r.bottom - r.top, SWP_NOZORDER | SWP_NOOWNERZORDER);
     ShowWindow(hwnd, SW_SHOW);
   }
   if (HICON small = hwnd ? loadIcon(SM_CXSMICON) : nullptr) SendMessageW(hwnd, WM_SETICON, ICON_SMALL, LPARAM(small));
   hwnd_ = hwnd;
+  gGameWindow = hwnd;
   gTitle = title;
   if (!hwnd) return false;
   const RAWINPUTDEVICE mouse{0x01, 0x02, 0, hwnd};  // generic desktop, mouse
@@ -441,15 +551,26 @@ void Window::present(const std::vector<uint32_t>& rgba, uint32_t width, uint32_t
   // The PS2 picture is 4:3 (or 16:9, F10) whatever its size in pixels; it is centred with black bars.
   RECT rc;
   GetClientRect(hwnd, &rc);
-  const int aw = wideScreen() ? 16 : 4, ah = wideScreen() ? 9 : 3;
+  const Aspect a = pictureAspect();
+  const int64_t aw = a.w, ah = a.h;
   int w = rc.right, h = rc.bottom;
-  if (w * ah > h * aw) w = h * aw / ah; else h = w * ah / aw;
+  if (w * ah > h * aw) w = int(h * aw / ah); else h = int(w * ah / aw);
   const int x = (rc.right - w) / 2, y = (rc.bottom - h) / 2;
   HDC dc = GetDC(hwnd);
   const HBRUSH black = static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH));
   const RECT bars[4] = {{0, 0, rc.right, y}, {0, y + h, rc.right, rc.bottom}, {0, y, x, y + h}, {x + w, y, rc.right, y + h}};
   for (const RECT& bar : bars)
     if (bar.right > bar.left && bar.bottom > bar.top) FillRect(dc, &bar, black);
+  if (const int b = settings().brightness; b != 100) {  // the brightness setting, as the GPU's picture has it
+    static int tableFor = 0;
+    static uint8_t table[256];
+    if (tableFor != b) {
+      for (int i = 0; i < 256; ++i) table[i] = uint8_t(std::lround(255.0 * std::pow(i / 255.0, 100.0 / b)));
+      tableFor = b;
+    }
+    uint8_t* p = reinterpret_cast<uint8_t*>(bgra.data());
+    for (size_t i = 0; i < bgra.size() * 4; i += 4) p[i] = table[p[i]], p[i + 1] = table[p[i + 1]], p[i + 2] = table[p[i + 2]];
+  }
   SetStretchBltMode(dc, COLORONCOLOR);
   StretchDIBits(dc, x, y, w, h, 0, 0, int(width), int(height), bgra.data(), &bi, DIB_RGB_COLORS, SRCCOPY);
   if (const std::string text = fpsText(); !text.empty()) {  // the counter: lit cells of the glyphs on a dark box

@@ -27,6 +27,7 @@ Cpu::RecompFn gAfterInput = nullptr;
 float gYaw = 0, gPitch = 0;
 int gUntaken = 0;  // frames queued since the camera last took the turn (menus, movies: none)
 float gViewYaw = 0, gViewPitch = 0;
+float gStickSpeed = 1;
 bool gViewFresh = false;
 
 float readFloat(Cpu& c, uint32_t address) { return std::bit_cast<float>(c.mem.read<uint32_t>(address)); }
@@ -34,6 +35,11 @@ void writeFloat(Cpu& c, uint32_t address, float v) { c.mem.write<uint32_t>(addre
 
 uint32_t afterInput(Cpu& c, uint32_t entry) {
   gUntaken = 0;
+  if (gStickSpeed != 1) {  // the stick's camera speed: its value scaled (beyond 1 too) before the mouse's turn joins it
+    const uint32_t sp = uint32_t(c.s.gpr[29].ud[0]);
+    writeFloat(c, sp + kStickX, readFloat(c, sp + kStickX) * gStickSpeed);
+    writeFloat(c, sp + kStickY, readFloat(c, sp + kStickY) * gStickSpeed);
+  }
   if (gYaw != 0 || gPitch != 0) {
     const uint32_t camera = uint32_t(c.s.gpr[17].ud[0]), sp = uint32_t(c.s.gpr[29].ud[0]);
     const float speed = camera ? readFloat(c, camera + kSpeed) : 0;
@@ -91,6 +97,8 @@ bool cameraView(float& yaw, float& pitch) {
   yaw = gViewYaw, pitch = gViewPitch;
   return std::exchange(gViewFresh, false);
 }
+
+void setStickCameraSpeed(float factor) { gStickSpeed = factor; }
 
 void queueCameraTurn(float yaw, float pitch) {
   // While nothing takes it (a menu, a movie), the mouse's motion is dropped rather than saved up

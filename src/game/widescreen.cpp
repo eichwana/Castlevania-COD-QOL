@@ -8,7 +8,8 @@
 
 namespace {
 // The function that sets up the 3D projection (FUN_00752698, called from 0x00772A70) gets the
-// horizontal scale in f13; three quarters of it shows a 16:9 field of view on a 16:9 screen
+// horizontal scale in f13; three quarters of it shows a 16:9 field of view on a 16:9 screen (and
+// 4:3 over the proportion in general: ultrawide)
 // (the patch multiplies its copy, f24, by 0.75 at 0x007526FC).
 constexpr uint32_t kProjection = 0x00752698;
 // The function that places the movie picture on the screen (FUN_00775328, a0..a3 in 1/16
@@ -30,7 +31,7 @@ int gFramesWithoutStatus = 1000;
 Cpu::RecompFn gProjection = nullptr, gMovieRect = nullptr, gSendLayers = nullptr, gStatusUpdate = nullptr;
 
 uint32_t projection(Cpu& c, uint32_t entry) {
-  if (wideScreen()) c.s.fpr[13] *= 0.75f;
+  if (wideScreen()) c.s.fpr[13] *= narrowing(pictureAspect());
   return gProjection(c, entry);
 }
 
@@ -53,6 +54,13 @@ uint32_t movieRect(Cpu& c, uint32_t entry) {
     if (ra == kDefaultMovieReturn) {
       c.s.gpr[5].ud[0] = rc::sx32(0x6D80);
       c.s.gpr[7].ud[0] = rc::sx32(0x2380);
+      // Wider than 16:9 (ultrawide): the movie stays 16:9, in the middle (a0 x, a2 width, in 1/16 pixels).
+      if (const Aspect a = pictureAspect(); int64_t(a.w) * 9 > int64_t(a.h) * 16) {
+        const int64_t x = int32_t(c.s.gpr[4].ud[0]), w = int32_t(c.s.gpr[6].ud[0]);
+        const int64_t narrowed = w * 16 * a.h / (9 * int64_t(a.w));
+        c.s.gpr[4].ud[0] = rc::sx32(uint32_t(x + (w - narrowed) / 2));
+        c.s.gpr[6].ud[0] = rc::sx32(uint32_t(narrowed));
+      }
     }
   }
   return gMovieRect(c, entry);

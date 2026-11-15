@@ -190,6 +190,9 @@ StructuredBuffer<uint> cluts : register(t2);
 #ifdef CACHED_TEXTURES
 Texture2D<float4> cachedTex : register(t6);
 SamplerState cachedSampler : register(s0);
+// How the texture coordinate changes from pixel to pixel (0: unknown), for the anisotropic filter
+// (Settings::anisotropy); the plain filter at level 0 ignores it.
+static float2 gGradX = 0, gGradY = 0;
 #endif
 
 #ifndef SURFACE_TEXTURE
@@ -354,7 +357,7 @@ int4 shadeWith(Prim p, int4 c, float s, float t, float q, float u, float v, floa
 #ifdef CACHED_TEXTURES
       if (fl & F_CACHED)  // the GPU's filter samples half a texel back too (not in the region modes)
         tf = p.wms > 1 || p.wmt > 1 ? cachedRegionTexel(p, tx, ty)
-                                    : int4(round(cachedTex.SampleLevel(cachedSampler, float2(tx / float(p.tw), ty / float(p.th)), 0) * 255.0));
+                                    : int4(round(cachedTex.SampleGrad(cachedSampler, float2(tx / float(p.tw), ty / float(p.th)), gGradX, gGradY) * 255.0));
       else
 #endif
         tf = filteredTexel(p, tx, ty, layer);
@@ -575,6 +578,13 @@ Out main(POSITION_INPUT, noperspective float4 colour : COLOUR,
   }
   const uint layer = uint(sys % SCALE) * SCALE + uint(sxs % SCALE);
   gLayer = layer;
+#ifdef CACHED_TEXTURES
+  {  // the texture coordinate's change across the pixel, for the anisotropic filter
+    const float2 size = float2(max(p.tw, 1), max(p.th, 1));
+    const float2 at = (p.flags & F_FST) ? uv / 16.0 / size : stqf.xy / (stqf.z != 0.0 ? stqf.z : 1.0);
+    gGradX = ddx(at), gGradY = ddy(at);
+  }
+#endif
   int4 c = clamp(int4(colour + 0.5), 0, 255);
   // Interpolation lands a hair under exact texel edges the GS reaches exactly; nudge past them.
   c = shadeWith(p, c, stqf.x + 2e-5 * stqf.z, stqf.y + 2e-5 * stqf.z, stqf.z, uv.x + 1.0 / 64, uv.y + 1.0 / 64, stqf.w + 1.0 / 64, layer);
@@ -880,6 +890,17 @@ float4 main(float4 pos : SV_Position) : SV_Target {
 }
 )";
 
+// The port's own text over the picture (host/overlay.h), a picture drawn as it is, faded.
+inline constexpr const char* kOverlayPs = R"(
+Texture2D image : register(t0);
+SamplerState pointSampler : register(s0);
+cbuffer Over : register(b0) { float alpha; float3 unused; };
+float4 main(float4 pos : SV_Position, float2 uv : UV) : SV_Target {
+  const float4 c = image.Sample(pointSampler, uv);
+  return float4(c.rgb, c.a * alpha);
+}
+)";
+
 // The map in the corner (game/minimap.h): triangles from a buffer, then the player's arrow.
 inline constexpr const char* kMapVs = R"(
 struct Vertex { float2 at; uint colour; };
@@ -984,7 +1005,81 @@ Out main(float4 pos : SV_Position) {
 inline constexpr const char* kPresentPs = R"(
 Texture2D picture : register(t0);
 SamplerState pointSampler : register(s0);
-float4 main(float4 pos : SV_Position, float2 uv : UV) : SV_Target { return picture.Sample(pointSampler, uv); }
+cbuffer Look : register(b0) {
+  float exponent;  // the brightness setting as a gamma: 1 leaves the picture as it is
+  float sharpen;   // 0 to 1: contrast-adaptive sharpening (AMD's CAS, its light form)
+  float crt;       // 1: scanlines and a shadow mask, as a tube TV
+  float colourBlind;  // 1, 2, 3: colours shifted for protanopia, deuteranopia, tritanopia
+  float2 pixel;    // one pixel of the window, in the picture's coordinates
+  float lines;     // the TV's lines over the picture (the PS2's 224 per field)
+  float unused;
+  float zoom;      // photo mode: the part of the picture shown, zoom times smaller, around
+  float2 centre;   // its middle (from the picture's middle)
+  float unused2;
+};
+// Daltonization (Fidaner, Lin and Ozguven): what the eye loses is simulated in LMS space and its
+// difference moved into the channels that eye still tells apart.
+float3 daltonize(float3 c, int kind) {
+  const float3x3 toLms = float3x3(17.8824, 43.5161, 4.11935, 3.45565, 27.1554, 3.86714, 0.0299566, 0.184309, 1.46709);
+  const float3x3 toRgb = float3x3(0.0809444479, -0.130504409, 0.116721066, -0.0102485335, 0.0540193266, -0.113614708,
+                                  -0.000365296938, -0.00412161469, 0.693511405);
+  const float3 lms = mul(toLms, c);
+  float3 seen = lms;
+  if (kind == 1) seen.x = 2.02344 * lms.y - 2.52581 * lms.z;
+  else if (kind == 2) seen.y = 0.494207 * lms.x + 1.24827 * lms.z;
+  else seen.z = -0.395913 * lms.x + 0.801109 * lms.y;
+  const float3 error = c - mul(toRgb, seen);
+  return saturate(c + float3(0, 0.7 * error.r + error.g, 0.7 * error.r + error.b));
+}
+float4 main(float4 pos : SV_Position, float2 uv : UV) : SV_Target {
+  if (zoom > 1.0) uv = 0.5 + centre + (uv - 0.5) / zoom;
+  float4 c = picture.Sample(pointSampler, uv);
+  if (sharpen > 0) {  // the cross of neighbours: sharpened where the contrast is low, less where it is high
+    const float3 n = picture.Sample(pointSampler, uv - float2(0, pixel.y)).rgb, s = picture.Sample(pointSampler, uv + float2(0, pixel.y)).rgb;
+    const float3 w = picture.Sample(pointSampler, uv - float2(pixel.x, 0)).rgb, e = picture.Sample(pointSampler, uv + float2(pixel.x, 0)).rgb;
+    const float3 lo = min(c.rgb, min(min(n, s), min(w, e))), hi = max(c.rgb, max(max(n, s), max(w, e)));
+    const float3 amount = sqrt(saturate(min(lo, 1.0 - hi) / max(hi, 1e-4)));
+    const float3 weight = amount * (-1.0 / lerp(8.0, 5.0, sharpen));
+    c.rgb = saturate((c.rgb + weight * (n + s + w + e)) / (1.0 + 4.0 * weight));
+  }
+  if (colourBlind > 0) c.rgb = daltonize(c.rgb, int(colourBlind));
+  if (exponent != 1.0) c.rgb = pow(saturate(c.rgb), exponent);
+  if (crt > 0) {
+    // Each line a beam brightest in its middle, thinner where it is dark; a mask of red, green and blue columns.
+    const float f = frac(uv.y * lines) - 0.5;
+    const float3 beam = exp(-f * f * lerp(10.0, 5.0, c.rgb));
+    const int column = int(pos.x) % 3;
+    const float3 mask = column == 0 ? float3(1.0, 0.8, 0.8) : column == 1 ? float3(0.8, 1.0, 0.8) : float3(0.8, 0.8, 1.0);
+    c.rgb = saturate(c.rgb * beam * mask * 1.6);
+  }
+  return c;
+}
+)";
+
+// FXAA (Timothy Lottes' fast form) over the picture, at its own resolution, before it is scaled.
+inline constexpr const char* kFxaaPs = R"(
+Texture2D picture : register(t0);
+SamplerState linearSampler : register(s0);
+cbuffer Fxaa : register(b0) { float2 texel; float2 unused; };
+float luma(float3 c) { return dot(c, float3(0.299, 0.587, 0.114)); }
+float4 main(float4 pos : SV_Position, float2 uv : UV) : SV_Target {
+  const float3 nw = picture.SampleLevel(linearSampler, uv + float2(-1, -1) * texel, 0).rgb;
+  const float3 ne = picture.SampleLevel(linearSampler, uv + float2(1, -1) * texel, 0).rgb;
+  const float3 sw = picture.SampleLevel(linearSampler, uv + float2(-1, 1) * texel, 0).rgb;
+  const float3 se = picture.SampleLevel(linearSampler, uv + float2(1, 1) * texel, 0).rgb;
+  const float4 m = picture.SampleLevel(linearSampler, uv, 0);
+  const float lnw = luma(nw), lne = luma(ne), lsw = luma(sw), lse = luma(se), lm = luma(m.rgb);
+  const float lo = min(lm, min(min(lnw, lne), min(lsw, lse))), hi = max(lm, max(max(lnw, lne), max(lsw, lse)));
+  if (hi - lo < max(0.0312, hi * 0.125)) return m;  // no edge here
+  float2 dir = float2(-((lnw + lne) - (lsw + lse)), (lnw + lsw) - (lne + lse));
+  const float reduce = max((lnw + lne + lsw + lse) * (0.25 / 8.0), 1.0 / 128.0);
+  dir = clamp(dir / (min(abs(dir.x), abs(dir.y)) + reduce), -8.0, 8.0) * texel;
+  const float3 a = 0.5 * (picture.SampleLevel(linearSampler, uv + dir * (1.0 / 3.0 - 0.5), 0).rgb +
+                          picture.SampleLevel(linearSampler, uv + dir * (2.0 / 3.0 - 0.5), 0).rgb);
+  const float3 b = a * 0.5 + 0.25 * (picture.SampleLevel(linearSampler, uv - dir * 0.5, 0).rgb + picture.SampleLevel(linearSampler, uv + dir * 0.5, 0).rgb);
+  const float lb = luma(b);
+  return float4(lb < lo || lb > hi ? a : b, m.a);
+}
 )";
 
 }  // namespace gpu_hlsl

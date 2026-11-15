@@ -414,7 +414,7 @@ void FrameGen::push(ID3D11Texture2D* picture, uint32_t w, uint32_t h, uint32_t s
   turned_ = 0;
   if (view.known && before.known) {
     const float yaw = std::remainder(view.yaw - before.yaw, 6.2831853f), pitch = view.pitch - before.pitch;
-    turnX_ = -450.0f * yaw * float(levelW_[0]) / 512.0f * (view.wide ? 0.75f : 1.0f);
+    turnX_ = -450.0f * yaw * float(levelW_[0]) / 512.0f * view.narrow;
     turnY_ = -560.0f * pitch * float(levelH_[0]) / 448.0f;
     turned_ = std::abs(turnX_) < 400 && std::abs(turnY_) < 400;  // (not a cut to another view)
   }

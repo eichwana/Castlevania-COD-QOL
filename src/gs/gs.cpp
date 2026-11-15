@@ -9,11 +9,12 @@
 
 #include "gs/color.h"
 #include "gs/gpu.h"
+#include "gs/button_icons.h"
 #include "host/window.h"
 #include "timer.h"
 
 // In 1/16 pixels. The game's picture is 512 wide; the 2D made for 4:3 keeps its shape in 16:9 at 3/4.
-static constexpr int32_t kPictureCentreX = 256 * 16, kWholeWidthNarrowed = 480 * 16 * 3 / 4;
+static constexpr int32_t kPictureCentreX = 256 * 16, kWholeWidth = 480 * 16;
 
 namespace {
 enum : uint32_t {
@@ -97,7 +98,7 @@ void Gs::writeReg(uint32_t reg, uint64_t v) {
       const Context& c = ctx_[bits(prmodecont_ & 1 ? prim_ : prmode_, 9, 1)];
       Vertex& vx = queue_[std::min(queued_, 2)];
       vx.x = int32_t(bits(v, 0, 16)) - int32_t(bits(c.xyoffset, 0, 16));
-      if (uiNarrow_) vx.x = kPictureCentreX + (vx.x - kPictureCentreX) * 3 / 4;
+      if (uiNarrow_) vx.x = kPictureCentreX + int32_t(int64_t(vx.x - kPictureCentreX) * uiNum_ / uiDen_);
       vx.y = int32_t(bits(v, 16, 16)) - int32_t(bits(c.xyoffset, 32, 16));
       vx.z = uint32_t(v >> 32);
       vx.r = uint8_t(rgbaq_);
@@ -173,7 +174,89 @@ void Gs::writeReg(uint32_t reg, uint64_t v) {
   }
 }
 
-void Gs::setUiLayer(bool on) { uiNarrow_ = on && wideScreen(); }
+void Gs::reshow() {
+  if (gpu_) gpu_->reshow();
+}
+
+void Gs::setUiPiece(int tag) { uiPiece_ = tag; }
+
+namespace {
+enum : uint8_t { kNoCorner, kTopLeft, kBottomLeft, kBottomRight };
+constexpr int32_t kUiWidth = 512 * 16, kUiHeight = 448 * 16;  // the game's 2D layout, in 1/16 pixels
+}  // namespace
+
+void Gs::endUiLayer() {
+  // Tags whose drawing touches (2 pixels apart at most) make one piece; each piece goes to the
+  // corner whose region holds it whole.
+  const size_t n = uiBoxes_.size();
+  std::vector<size_t> parent(n);
+  for (size_t i = 0; i < n; ++i) parent[i] = i;
+  auto root = [&](size_t i) {
+    while (parent[i] != i) i = parent[i] = parent[parent[i]];
+    return i;
+  };
+  constexpr int32_t kTouch = 2 * 16;
+  for (size_t i = 0; i < n; ++i) {
+    if (uiBoxes_[i].x0 > uiBoxes_[i].x1) continue;
+    for (size_t j = i + 1; j < n; ++j) {
+      const UiBox &a = uiBoxes_[i], &b = uiBoxes_[j];
+      if (b.x0 > b.x1) continue;
+      if (a.x0 <= b.x1 + kTouch && b.x0 <= a.x1 + kTouch && a.y0 <= b.y1 + kTouch && b.y0 <= a.y1 + kTouch) parent[root(j)] = root(i);
+    }
+  }
+  std::vector<UiBox> pieces(n);
+  for (size_t i = 0; i < n; ++i) {
+    if (uiBoxes_[i].x0 > uiBoxes_[i].x1) continue;
+    UiBox& p = pieces[root(i)];
+    p.x0 = std::min(p.x0, uiBoxes_[i].x0), p.y0 = std::min(p.y0, uiBoxes_[i].y0);
+    p.x1 = std::max(p.x1, uiBoxes_[i].x1), p.y1 = std::max(p.y1, uiBoxes_[i].y1);
+  }
+  uiCorners_.assign(n, kNoCorner);
+  for (size_t i = 0; i < n; ++i) {
+    const UiBox& p = pieces[root(i)];
+    if (p.x0 > p.x1) continue;
+    const int64_t w = kUiWidth, h = kUiHeight;
+    if (p.x1 <= w * 60 / 100 && p.y1 <= h * 35 / 100) uiCorners_[i] = kTopLeft;
+    else if (p.x1 <= w * 45 / 100 && p.y0 >= h * 40 / 100) uiCorners_[i] = kBottomLeft;
+    else if (p.x0 >= w * 55 / 100 && p.y0 >= h * 75 / 100) uiCorners_[i] = kBottomRight;
+  }
+  uiBoxes_.clear();
+}
+
+void Gs::resizeHudPiece() {
+  static constexpr int kCount[8] = {1, 2, 2, 3, 3, 3, 2, 1};
+  const int count = kCount[bits(prim_, 0, 3)];
+  // The game's own coordinates: before the 16:9 narrowing.
+  auto raw = [&](int32_t x) { return uiNarrow_ ? kPictureCentreX + int32_t(int64_t(x - kPictureCentreX) * uiDen_ / uiNum_) : x; };
+  auto narrow = [&](int32_t x) { return uiNarrow_ ? kPictureCentreX + int32_t(int64_t(x - kPictureCentreX) * uiNum_ / uiDen_) : x; };
+  if (uiPiece_ < 0) return;
+  if (size_t(uiPiece_) >= uiBoxes_.size()) uiBoxes_.resize(size_t(uiPiece_) + 1);
+  UiBox& box = uiBoxes_[size_t(uiPiece_)];
+  for (int i = 0; i < count; ++i) {
+    const int32_t x = raw(queue_[i].x), y = queue_[i].y;
+    box.x0 = std::min(box.x0, x), box.x1 = std::max(box.x1, x), box.y0 = std::min(box.y0, y), box.y1 = std::max(box.y1, y);
+  }
+  const uint8_t corner = size_t(uiPiece_) < uiCorners_.size() ? uiCorners_[size_t(uiPiece_)] : kNoCorner;
+  if (corner == kNoCorner) return;
+  const int32_t ax = corner == kBottomRight ? kUiWidth : 0, ay = corner == kTopLeft ? 0 : kUiHeight;
+  const int64_t s = std::clamp(hudScale.load(std::memory_order_relaxed), 50, 200);
+  for (int i = 0; i < count; ++i) {
+    queue_[i].x = narrow(ax + int32_t(int64_t(raw(queue_[i].x) - ax) * s / 100));
+    queue_[i].y = ay + int32_t(int64_t(queue_[i].y - ay) * s / 100);
+  }
+}
+
+void Gs::setUiLayer(bool on) {
+  if (uiLayer_ && !on) endUiLayer();
+  uiLayer_ = on && hudScale.load(std::memory_order_relaxed) != 100;
+  uiPiece_ = uiLayer_ ? 0 : -1;
+  uiNarrow_ = on && wideScreen();
+  uiHidden_ = on && hideHud.load(std::memory_order_relaxed);
+  if (uiNarrow_) {
+    const Aspect a = pictureAspect();
+    uiNum_ = 4 * int64_t(a.h), uiDen_ = 3 * int64_t(a.w);  // 36/48 at 16:9: the same as 3/4
+  }
+}
 
 void Gs::vertexKick(bool drawing, bool) {
   const uint32_t type = bits(prim_, 0, 3);
@@ -181,10 +264,20 @@ void Gs::vertexKick(bool drawing, bool) {
   ++queued_;
   if (queued_ < kNeeded[type]) return;
   // A sprite across the screen is a background or a fade: it stays as wide as the picture.
-  if (uiNarrow_ && type == 6 && std::abs(queue_[1].x - queue_[0].x) >= kWholeWidthNarrowed) {
-    for (int i = 0; i < 2; ++i) queue_[i].x = kPictureCentreX + (queue_[i].x - kPictureCentreX) * 4 / 3;
+  if (uiNarrow_ && type == 6 && std::abs(queue_[1].x - queue_[0].x) >= kWholeWidth * uiNum_ / uiDen_) {
+    for (int i = 0; i < 2; ++i) queue_[i].x = kPictureCentreX + int32_t(int64_t(queue_[i].x - kPictureCentreX) * uiDen_ / uiNum_);
   }
-  if (drawing) drawPrimitive();
+  if (drawing && !uiHidden_) {
+    if (uiLayer_ && !(type == 6 && std::abs(queue_[1].x - queue_[0].x) >= kWholeWidth * (uiNarrow_ ? uiNum_ : 1) / (uiNarrow_ ? uiDen_ : 1))) {
+      // The HUD resized: this primitive drawn moved, the queue kept as it was for the strips after it.
+      const std::array<Vertex, 3> kept{queue_[0], queue_[1], queue_[2]};
+      resizeHudPiece();
+      drawPrimitive();
+      queue_[0] = kept[0], queue_[1] = kept[1], queue_[2] = kept[2];
+    } else {
+      drawPrimitive();
+    }
+  }
   switch (type) {
     case 0: case 1: case 3: case 6: case 7: queued_ = 0; break;  // point, line, triangle, sprite
     case 2: queue_[0] = queue_[1]; queued_ = 1; break;           // line strip
@@ -305,8 +398,36 @@ void Gs::writeImage(const uint64_t* data, uint32_t count) {
   if (trxData_.size() == trxNeeded_) submitUpload();
 }
 
+// Each icon row as a host-to-local transfer, as the game's own uploads go (so both renderers have
+// it), the game's transfer registers kept.
+void Gs::writeButtonIcons(uint32_t bp) {
+  const uint64_t bitbltbuf = bitbltbuf_, trxpos = trxpos_, trxreg = trxreg_, trxdir = trxdir_;
+  for (const ButtonIconPatch& p : xboxButtonIcons()) {
+    bitbltbuf_ = uint64_t(bp) << 32 | uint64_t(kIconAtlasBw) << 48 | uint64_t(kIconAtlasPsm) << 56;
+    trxpos_ = uint64_t(p.x) << 32 | uint64_t(p.y) << 48;
+    trxreg_ = p.width | uint64_t(p.height) << 32;
+    trxdir_ = 0;
+    startTransfer();
+    writeImage(p.data.data(), uint32_t(p.data.size()));
+  }
+  bitbltbuf_ = bitbltbuf, trxpos_ = trxpos, trxreg_ = trxreg, trxdir_ = trxdir;
+}
+
 void Gs::submitUpload() {
   trxActive_ = false;
+  // The interface atlas with the button icons: the Xbox ones go over them once it is in.
+  bool iconAtlas = false;
+  if (trxData_.size() == kIconAtlasWords && xboxIcons.load(std::memory_order_relaxed)) {
+    uint64_t h = 0xCBF29CE484222325ull;
+    for (uint64_t w : trxData_) h = (h ^ w) * 0x100000001B3ull;
+    iconAtlas = h == kIconAtlasHash;
+  }
+  const uint32_t iconAtlasBp = bits(bitbltbuf_, 32, 14);
+  submitUploadNow();
+  if (iconAtlas) writeButtonIcons(iconAtlasBp);
+}
+
+void Gs::submitUploadNow() {
   if (gpu_) {  // after the primitives before it
     flush();
     gpu_->upload(bitbltbuf_, trxpos_, trxreg_, trxData_);

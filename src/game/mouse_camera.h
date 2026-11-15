@@ -9,6 +9,10 @@ class Cpu;
 // made to include the mouse's turn. Not available with --interp (no recompiled code to hook).
 void installMouseCamera(Cpu& cpu);
 
+// The right stick's camera speed, as a factor of the game's (1: as the game turns it; more than 1
+// turns faster than the game ever does). Applied to the stick's value where the game reads it.
+void setStickCameraSpeed(float factor);
+
 // The mouse's turn this frame, in radians: yaw to the left positive (as the stick pushed left
 // turns it), pitch up positive (as the stick pushed down). Kept until the camera takes it.
 void queueCameraTurn(float yaw, float pitch);

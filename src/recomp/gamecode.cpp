@@ -9,12 +9,14 @@
 #define NOMINMAX
 #include <windows.h>
 
+#include <cstring>
 #include <filesystem>
 #include <string>
 #include <vector>
 
 #include "ee/vu.h"
 #include "recomp/runtime.h"
+#include "version.h"
 
 namespace {
 std::filesystem::path besideProgram(const wchar_t* name) {
@@ -42,14 +44,35 @@ void vuBlocksOf(HMODULE m, std::vector<VuBlockEntry>& out) {
   if (auto f = reinterpret_cast<Fn>(GetProcAddress(m, "codportVuBlocks"))) f(out);
 }
 
+bool gOld = false;  // a part built by another version of the port was left out
+
+// A part, if it was built by this version of the port: one built by another was made against other
+// structures (an update extracted over an older one, before Setup builds the game again), and
+// calling it could crash; the interpreter runs its code instead.
+HMODULE loadPart(const Part& p) {
+  HMODULE m = LoadLibraryW(besideProgram(p.dll).c_str());
+  if (!m) return nullptr;
+  using Fn = const char* (*)();
+  const auto builtBy = reinterpret_cast<Fn>(GetProcAddress(m, "codportBuiltBy"));
+  if (builtBy && std::strcmp(builtBy(), CODPORT_VERSION) == 0) return m;
+  FreeLibrary(m);
+  gOld = true;
+  return nullptr;
+}
+
 // The parts there at start (a part still being written fails to load, and is loaded later).
 void loadAtStart() {
   static bool done = false;
   if (done) return;
   done = true;
-  for (Part& p : gParts) p.module = LoadLibraryW(besideProgram(p.dll).c_str());
+  for (Part& p : gParts) p.module = loadPart(p);
 }
 }  // namespace
+
+bool gameCodeIsOld() {
+  loadAtStart();
+  return gOld;
+}
 
 void registerRecompiled(std::vector<rc::Entry>& out) {
   loadAtStart();
@@ -71,7 +94,7 @@ bool newGameCode(std::vector<rc::Entry>& out) {
     if (p.module || !p.ready) continue;
     std::error_code ec;
     if (!std::filesystem::exists(besideProgram(p.ready), ec)) continue;
-    if (!(p.module = LoadLibraryW(besideProgram(p.dll).c_str()))) continue;
+    if (!(p.module = loadPart(p))) continue;
     entriesOf(p.module, out);
     std::vector<VuBlockEntry> blocks;
     vuBlocksOf(p.module, blocks);

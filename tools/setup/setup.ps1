@@ -66,7 +66,7 @@ function AllReady { (Ready) -and (Test-Path (Join-Path $root 'build\codport_game
 $form = New-Object Windows.Forms.Form
 $form.Text = 'Castlevania: Curse of Darkness - Setup'
 try { $form.Icon = New-Object Drawing.Icon (Join-Path $PSScriptRoot 'setup.ico') } catch {}
-$form.ClientSize = New-Object Drawing.Size(640, 520)
+$form.ClientSize = New-Object Drawing.Size(640, 546)
 $form.FormBorderStyle = 'FixedDialog'
 $form.MaximizeBox = $false
 $form.StartPosition = 'CenterScreen'
@@ -261,4 +261,40 @@ if (-not $isoBox.Text) {  # an image already next to the project
   if ($found -and (Test-Iso $found.FullName)) { $isoBox.Text = $found.FullName; Save-Iso $found.FullName }
 }
 Refresh-State
+
+# A newer release on GitHub than this codport.exe (its file version): said at the bottom, with a link.
+# Asked in the background (GitHub's public "latest release", nothing about the player is sent).
+$newer = New-Object Windows.Forms.LinkLabel
+$newer.SetBounds(16, 516, 608, 22)
+$newer.Visible = $false
+$newer.Add_LinkClicked({ Start-Process 'https://github.com/fasipe/Castlevania-COD-QOL/releases/latest' })
+$form.Controls.Add($newer)
+$script:updateTask = $null
+try {
+  $ours = [Version](Get-Item $exe -ErrorAction Stop).VersionInfo.ProductVersion
+  Add-Type -AssemblyName System.Net.Http
+  [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+  $client = New-Object Net.Http.HttpClient
+  $client.Timeout = [TimeSpan]::FromSeconds(8)
+  $client.DefaultRequestHeaders.Add('User-Agent', 'codport-setup')
+  $script:updateTask = $client.GetStringAsync('https://api.github.com/repos/fasipe/Castlevania-COD-QOL/releases/latest')
+} catch {}
+$updateTimer = New-Object Windows.Forms.Timer
+$updateTimer.Interval = 300
+$updateTimer.Add_Tick({
+  if (-not $script:updateTask) { $updateTimer.Stop(); return }
+  if (-not $script:updateTask.IsCompleted) { return }
+  $updateTimer.Stop()
+  try {
+    if ($script:updateTask.Status -eq 'RanToCompletion' -and $script:updateTask.Result -match '"tag_name"\s*:\s*"v?([0-9.]+)"') {
+      $latest = [Version]$Matches[1]
+      if ($latest -gt $ours) {
+        $newer.Text = (T 'A new version is out: ' 'Saiu uma versão nova: ') + $Matches[1] + (T ' - download it on GitHub' ' - baixe no GitHub')
+        $newer.LinkArea = New-Object Windows.Forms.LinkArea(0, $newer.Text.Length)
+        $newer.Visible = $true
+      }
+    }
+  } catch {}
+})
+$updateTimer.Start()
 [void]$form.ShowDialog()

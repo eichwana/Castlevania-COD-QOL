@@ -26,6 +26,7 @@
 #include "elf.h"
 #include "gs/graphics.h"
 #include "gs/shader_cache.h"
+#include "host/update_check.h"
 #include "host/audio.h"
 #include "host/gamepad.h"
 #include "host/icon.h"
@@ -33,7 +34,12 @@
 #include "host/settings.h"
 #include "game/attack_turn.h"
 #include "game/loading.h"
+#include "game/achievements.h"
+#include "game/game_info.h"
 #include "game/minimap.h"
+#include "game/speedrun.h"
+#include "host/discord.h"
+#include "host/pcsx2_saves.h"
 #include "game/mouse_camera.h"
 #include "game/sprint.h"
 #include "game/widescreen.h"
@@ -49,6 +55,7 @@
 
 void registerRecompiled(std::vector<rc::Entry>& out);  // src/recomp/gamecode.cpp
 bool newGameCode(std::vector<rc::Entry>& out);
+bool gameCodeIsOld();  // a part of the game's code was built by another version of the port
 
 namespace fs = std::filesystem;
 
@@ -168,12 +175,14 @@ int main(int argc, char** argv) {
   bool profiling = false;
   uint64_t stopFrame = 0, callsFrom = 0;
   std::vector<uint32_t> peeks;  // words of EE memory to print at the end (debugging)
+  uint64_t peekEvery = 0;       // and every N frames
   struct MemDump {
     uint32_t addr, size;
     std::string file;
   };
   std::vector<MemDump> memDumps;  // EE memory ranges saved to files at the end (debugging)
   fs::path recompileList, recompileOut, recompileOnly, vuBlocksFile, vuOut, iconOut;
+  std::pair<bool, fs::path> saveTransfer;  // --import-saves / --export-saves: PCSX2 card, as the F1 window does
   std::vector<uint64_t> shots;  // --shot N: frames to take a screenshot of the window at
   std::string wavFile;  // the sound output, saved at the end
   fs::path replayFile;  // a recorded session to play back (build/recordings/*.txt)
@@ -200,6 +209,8 @@ int main(int argc, char** argv) {
       i += 3;
     } else if (a == "--peek" && i + 1 < argc) {
       peeks.push_back(uint32_t(std::stoul(argv[++i], nullptr, 16)));
+    } else if (a == "--peek-every" && i + 1 < argc) {
+      peekEvery = std::stoull(argv[++i]);
     } else if (a == "--stats" && i + 1 < argc) {
       statsEvery = std::stoull(argv[++i]);
     } else if (a == "--frames" && i + 1 < argc) {
@@ -211,7 +222,7 @@ int main(int argc, char** argv) {
     } else if (a == "--dump-from" && i + 1 < argc) {
       dumpFrom = std::stoull(argv[++i]);
     } else if (a == "--scale" && i + 1 < argc) {
-      scaleOption = std::clamp(std::stoi(argv[++i]), 1, 4);
+      scaleOption = std::clamp(std::stoi(argv[++i]), 1, 6);
     } else if (a == "--wide") {
       settings().wide = true;
     } else if (a == "--attack-turn") {
@@ -232,6 +243,9 @@ int main(int argc, char** argv) {
       vuOut = argv[++i];
     } else if (a == "--shot" && i + 1 < argc) {
       shots.push_back(std::stoull(argv[++i]));
+    } else if ((a == "--import-saves" || a == "--export-saves") && i + 1 < argc) {
+      const std::string where = argv[++i];
+      saveTransfer = {a == "--import-saves", fs::path(std::u8string(where.begin(), where.end()))};
     } else if (a == "--make-icon" && i + 1 < argc) {
       iconOut = argv[++i];
     } else if (a == "--shader-cache" && i + 1 < argc) {
@@ -255,6 +269,13 @@ int main(int argc, char** argv) {
   const fs::path exeDir = fs::absolute(argv[0]).parent_path();
   const fs::path settingsFile = (exeDir.filename() == "build" ? exeDir.parent_path() : exeDir) / "codport.ini";
   auto fromUtf8 = [](const std::string& s) { return fs::path(std::u8string(s.begin(), s.end())); };
+  if (!saveTransfer.second.empty()) {
+    setMemcardFolder((exeDir.filename() == "build" ? exeDir.parent_path() : exeDir) / "memcard");
+    const std::wstring report = saveTransfer.first ? importPcsx2Saves(saveTransfer.second) : exportToPcsx2Folder(saveTransfer.second);
+    const std::u8string text = fs::path(report).u8string();
+    std::printf("%s\n", reinterpret_cast<const char*>(text.c_str()));
+    return 0;
+  }
   if (isoPath.empty() && !headless) {
     Settings saved = Settings::defaults();
     saved.load(settingsFile);
@@ -349,6 +370,15 @@ int main(int argc, char** argv) {
   if (!interpOnly) {
     std::vector<rc::Entry> entries;
     registerRecompiled(entries);
+    if (gameCodeIsOld()) {
+      std::printf("the game's code was built by another version of the port: run Setup again (Build the game)\n");
+      if (!headless)
+        showWarning(
+                    english() ? L"The game's code was built by an earlier version of the port. Run Setup.exe and choose Build the game.\n\n"
+                                L"Until then the game runs without it, very slowly."
+                              : L"O código do jogo foi feito por uma versão anterior do port. Rode o Setup.exe e escolha Gerar o jogo.\n\n"
+                                L"Até lá o jogo roda sem ele, bem devagar.");
+    }
     // The table covers all of the program now, so that parts of the code loaded later (while the
     // CPU runs) only fill slots in it.
     for (const auto& seg : elf.segments)
@@ -373,6 +403,7 @@ int main(int argc, char** argv) {
   if (!wavFile.empty() || !headless) sif.spu->output = &sound;
   // Memory card saves live next to the build folder, so rebuilding never touches them.
   sif.saveDir = (exeDir.filename() == "build" ? exeDir.parent_path() : exeDir) / "memcard";
+  setMemcardFolder(sif.saveDir);  // the player's, for the saves from and to PCSX2 (F1)
   sif.clockBase = int64_t(std::time(nullptr));
 
   // Sessions played in the window are recorded (controller state per frame, with the clock and a
@@ -384,7 +415,13 @@ int main(int argc, char** argv) {
   std::vector<PadSample> replay;
   struct ReplaySet {
     uint64_t frame;
-    bool sprint, on;  // sprint, else the attack turn
+    std::string name;  // sprint, attack-turn, camera-speed
+    int value;
+  };
+  auto applySet = [](const std::string& name, int value) {
+    if (name == "sprint") setSprint(value != 0);
+    else if (name == "attack-turn") setAttackTurn(value != 0);
+    else if (name == "camera-speed") setStickCameraSpeed(float(value) / 100);
   };
   std::vector<ReplaySet> replaySets;
   std::ofstream recording;
@@ -410,11 +447,17 @@ int main(int argc, char** argv) {
         setSprint(true);
         continue;
       }
-      if (line.rfind("set ", 0) == 0) {  // an option changed while it played: "set <frame> <name> <0|1>"
+      if (line.rfind("camera-speed ", 0) == 0) {  // the right stick's camera speed, in percent
+        std::string word;
+        int value = 100;
+        if (ls >> word >> value) setStickCameraSpeed(float(value) / 100);
+        continue;
+      }
+      if (line.rfind("set ", 0) == 0) {  // an option changed while it played: "set <frame> <name> <value>"
         std::string word, name;
         uint64_t frame = 0;
-        int on = 0;
-        if (ls >> word >> frame >> name >> on) replaySets.push_back({frame, name == "sprint", on != 0});
+        int value = 0;
+        if (ls >> word >> frame >> name >> value) replaySets.push_back({frame, name, value});
         continue;
       }
       if (line.rfind("clock ", 0) == 0) {
@@ -462,11 +505,15 @@ int main(int argc, char** argv) {
     // defaults so the player can find it.
     const bool existed = fs::exists(settingsFile);
     settings().load(settingsFile);
-    if (replayFile.empty()) setAttackTurn(settings().attackTurn), setSprint(settings().sprint);
+    if (replayFile.empty() || std::getenv("CODPORT_EXTRAS_IN_REPLAY")) loadAchievements(settingsFile.parent_path() / "conquistas.txt");
+    if (replayFile.empty())
+      setAttackTurn(settings().attackTurn), setSprint(settings().sprint), setStickCameraSpeed(float(settings().stickCameraSpeed) / 100);
     if (recording.is_open() && settings().attackTurn) recording << "attack-turn\n";
     if (recording.is_open() && settings().sprint) recording << "sprint\n";
+    if (recording.is_open() && settings().stickCameraSpeed != 100) recording << "camera-speed " << settings().stickCameraSpeed << '\n';
     if (!existed) settings().save();
     window.create(L"Castlevania: Curse of Darkness", settings().windowWidth, settings().windowHeight);
+    if (replayFile.empty()) startUpdateCheck();
     speakers.open(Spu2::kSampleRate);
   }
   if (!software) {
@@ -484,13 +531,14 @@ int main(int argc, char** argv) {
         }
         // Sprint and the attack turn change how the game plays: a recording notes when.
         if (replaying) return;
-        static bool sprint = settings().sprint, turn = settings().attackTurn;
-        for (auto [now, was, name] : {std::tuple{settings().sprint, &sprint, "sprint"}, std::tuple{settings().attackTurn, &turn, "attack-turn"}}) {
+        static int sprint = settings().sprint, turn = settings().attackTurn, speed = settings().stickCameraSpeed;
+        for (auto [now, was, name] : {std::tuple{int(settings().sprint), &sprint, "sprint"}, std::tuple{int(settings().attackTurn), &turn, "attack-turn"},
+                                      std::tuple{settings().stickCameraSpeed, &speed, "camera-speed"}}) {
           if (now == *was) continue;
           *was = now;
-          if (recording.is_open()) recording << "set " << std::dec << mem.hw.frames << ' ' << name << ' ' << (now ? 1 : 0) << '\n', recording.flush();
+          if (recording.is_open()) recording << "set " << std::dec << mem.hw.frames << ' ' << name << ' ' << now << '\n', recording.flush();
         }
-        setSprint(sprint), setAttackTurn(turn);
+        setSprint(sprint != 0), setAttackTurn(turn != 0), setStickCameraSpeed(float(speed) / 100);
       });
     if (gfx.useGpu(headless ? nullptr : window.handle(), uint32_t(scaleOption ? scaleOption : settings().scale), why))
       std::printf("drawing on the graphics card\n");
@@ -517,10 +565,15 @@ int main(int argc, char** argv) {
   // A replay in the window taking screenshots runs as fast as it can, silent.
   const bool unpaced = !replayFile.empty() && !shots.empty();
   mem.hw.onVblank = [&] {
-    const bool loading = !headless && settings().fastLoading && gameIsLoading(mem);
+    const bool loading = !headless && ((settings().fastLoading && gameIsLoading(mem)) || (settings().fastOpening && gameIsInOpeningWait(mem)));
     const uint64_t n = mem.hw.frames;
     sif.vblank();
     samplerFrame(n);
+    if (peekEvery && n % peekEvery == 0 && !peeks.empty()) {
+      std::printf("peek %llu:", (unsigned long long)n);
+      for (uint32_t addr : peeks) std::printf(" %08X", mem.read<uint32_t>(addr));
+      std::printf("\n");
+    }
     if (statsEvery && n % statsEvery == 0) {
       struct Snapshot {
         std::chrono::steady_clock::time_point at;
@@ -545,6 +598,7 @@ int main(int argc, char** argv) {
       last = now;
     }
     if (!sound.empty()) {
+      if (!headless && n % 30 == 0) speakers.follow();  // the output device or 5.1 changed in F1
       if (!headless && !loading && !unpaced) speakers.push(sound.data(), sound.size());
       if (!wavFile.empty()) audio.insert(audio.end(), sound.begin(), sound.end());
       sound.clear();
@@ -579,10 +633,14 @@ int main(int argc, char** argv) {
       static size_t next = 0, nextSet = 0;
       while (next < replay.size() && replay[next].frame <= n) gPadInput = replay[next++].pad;
       for (; nextSet < replaySets.size() && replaySets[nextSet].frame <= n; ++nextSet)
-        (replaySets[nextSet].sprint ? setSprint : setAttackTurn)(replaySets[nextSet].on);
+        applySet(replaySets[nextSet].name, replaySets[nextSet].value);
     } else if (!headless) {
       applyGamepad(keyboardPad());
+      applyRumble();
     }
+    static const bool iconsForced = std::getenv("CODPORT_XBOX_ICONS") != nullptr;  // also in replays, to check them
+    gfx.gs.hudScale.store(headless ? 100 : settings().hudScale, std::memory_order_relaxed);
+    gfx.gs.xboxIcons.store((!headless && settings().xboxIcons) || iconsForced, std::memory_order_relaxed);
     if (recording.is_open()) {
       static PadInput last{};
       static bool first = true;
@@ -624,7 +682,50 @@ int main(int argc, char** argv) {
     }
     if (!headless) {
       updateMinimap(cpu);
-      if (!window.pump()) cpu.halt(StopReason::Exit, "window closed");
+      {  // the port's extras: the speedrun timer, achievements, Discord (they only read the game)
+        static uint64_t lastCycles = mem.hw.cycles;
+        const double frameSeconds = double(mem.hw.cycles - lastCycles) / Hardware::kEeHz;
+        lastCycles = mem.hw.cycles;
+        const GameInfo info = readGameInfo(mem);
+        // A replay unlocks nothing and tells no one (CODPORT_EXTRAS_IN_REPLAY: it does, for testing).
+        static const bool live = replayFile.empty() || std::getenv("CODPORT_EXTRAS_IN_REPLAY");
+        updateSpeedrun(info, frameSeconds, live);
+        if (live) {
+          updateAchievements(info, gamePlaying());
+          if (n % 60 == 0) {
+            const std::string level = std::format("{} {}", english() ? "Level" : "Nível", info.level);
+            setDiscordPresence(info.inGame ? areaName(info.area) : "", info.inGame ? level : "");
+          }
+        }
+      }
+      // Low latency (Settings::lowLatency): the keyboard, mouse and controller are read after the
+      // wait for real time, just before the next frame runs, not before the wait.
+      const bool readLate = settings().lowLatency;
+      if (!readLate && !window.pump()) cpu.halt(StopReason::Exit, "window closed");
+      // Photo mode (F6): one more frame drawn without the HUD, then the game waits here, the
+      // window showing that picture moved and zoomed, until F6 or Esc again.
+      {
+        static int freezeIn = 0;
+        // CODPORT_TEST_PHOTO=N: at frame N of a replay, photo mode with a screenshot (for testing).
+        static const uint64_t testPhoto = std::getenv("CODPORT_TEST_PHOTO") ? std::strtoull(std::getenv("CODPORT_TEST_PHOTO"), nullptr, 10) : 0;
+        const bool testing = testPhoto && n == testPhoto;
+        if ((takePhotoToggle() || testing) && gfx.gs.usingGpu()) gfx.gs.hideHud = true, freezeIn = 3;
+        if (freezeIn > 0 && --freezeIn == 0) {
+          gfx.drain();
+          setPhotoMode(true);
+          bool open = true;
+          for (int shown = 0; (open = window.pump()) && !takePhotoToggle(); ++shown) {
+            if (testPhoto && shown == 10) requestScreenshot(exeDir / "shots" / "photo.png");
+            gfx.gs.reshow();
+            if (testPhoto && shown == 20) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(15));
+          }
+          setPhotoMode(false);
+          gfx.gs.hideHud = false;
+          wallStart = std::chrono::steady_clock::now() - std::chrono::microseconds(mem.hw.cycles * 1000000 / Hardware::kEeHz);
+          if (!open) cpu.halt(StopReason::Exit, "window closed");
+        }
+      }
       // Real time keeps pace with emulated time (50 or 60 fields per second, as the game chose).
       // Time lost to a stall is not made up: running fast to catch up would push sound faster
       // than it plays (and the excess would be cut), so the pace starts again from now.
@@ -634,6 +735,7 @@ int main(int argc, char** argv) {
         if (now < due) wallStart -= due - now;
       } else if (now < due) sleepUntil(due);
       else if (now - due > std::chrono::milliseconds(50)) wallStart += now - due;
+      if (readLate && !window.pump()) cpu.halt(StopReason::Exit, "window closed");
     }
   };
 
@@ -641,6 +743,9 @@ int main(int argc, char** argv) {
   sampleThisThread("emulation");
   const auto start = std::chrono::steady_clock::now();
   cpu.run(maxInstructions);
+  if (!headless && replayFile.empty()) stopRumble();
+  stopSpeedrun();
+  stopDiscord();
   const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
 
   std::printf("== stopped: %s\n   %s\n", toString(cpu.stop), cpu.stopDetail.c_str());

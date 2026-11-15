@@ -42,7 +42,16 @@ void reportError(const std::string& message);
 // Asks the player for the game's disc image (an Open dialog); empty if they cancel.
 std::filesystem::path askForIso();
 
-bool wideScreen();  // F10: the picture is shown 16:9 instead of 4:3
+bool wideScreen();  // F10: the picture is shown 16:9 (or wider, pictureAspect) instead of 4:3
+// The picture's proportion, width to height: 4:3, 16:9, or with the ultrawide setting the window's
+// own when it is wider than 16:9 (21:9, 32:9 at most). Read from any thread.
+struct Aspect {
+  int w, h;
+};
+Aspect pictureAspect();
+// How much narrower than the PS2's 4:3 the game's horizontal field of view is drawn so that the
+// picture, widened to this proportion, keeps its shapes: 0.75 at 16:9.
+inline float narrowing(Aspect a) { return float(4.0 * a.h / (3.0 * a.w)); }
 // The F1 window's options page changes these on the game window (an HWND) as its keys do.
 void setFullscreen(void* window, bool on);
 void setWide(void* window, bool on);
@@ -58,6 +67,19 @@ void settingsChanged();
 // the second without the game's 50/60 Hz pace; empty when the counter is off (F9). `shownEach`:
 // pictures shown for each of the game's (more with interpolation).
 std::string fpsText(double shownEach = 1);
+int windowClientHeight();  // the game window's inside, in pixels (any thread)
+void showWarning(const wchar_t* text);  // a message box with the game's name, before the window opens
+// Photo mode (F6): the game frozen without its HUD or the port's overlays; the wheel (or +/-)
+// zooms, the arrows or W/A/S/D (or dragging with the left button) move around, F12 saves.
+struct PhotoView {
+  bool on = false;
+  float zoom = 1, x = 0, y = 0;  // the middle shown, in the picture's coordinates from its middle
+};
+PhotoView photoView();
+bool takePhotoToggle();       // F6 was pressed since the last call
+void setPhotoMode(bool on);  // on: starts at the whole picture; off: back to the game
+// The window's title written again (from any thread): it also says when a newer version is out.
+void refreshTitle();
 // Where "possible" comes from: the working seconds so far of each part that takes its turn every
 // frame (threads' CPU time, the graphics card's time), the busiest of which sets the pace.
 void setWorkClocks(std::function<std::vector<double>()> clocks);

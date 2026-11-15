@@ -8,11 +8,15 @@
 #include <algorithm>
 #include <cmath>
 
+#include "host/playstation_pad.h"
 #include "host/settings.h"
 #include "host/window.h"
 #include "iop/pad.h"
 
 namespace {
+enum class Source { None, XInput, PlayStation };
+Source gSource = Source::None;  // where readController found the controller
+
 // An XInput stick (-32768..32767, y up) as a DualShock 2 stick (0..255, 0x80 centred, y down).
 // The dead zone is round and the range past it is stretched so that pushing the stick most of the
 // way reaches the end: Xbox sticks move in a circle and seldom report their full range, while a
@@ -43,7 +47,7 @@ void applyMouse(PadInput& in) {
   const Settings& s = settings();
   if (!s.mouseCamera) return;
   const float perCount = 0.015f * std::clamp(s.mouseSensitivity, 1, 10) * 3.14159265f / 180;
-  in.turnYaw = float(dx) * perCount;
+  in.turnYaw = float(s.invertMouseX ? -dx : dx) * perCount;
   in.turnPitch = float(s.invertMouseY ? dy : -dy) * perCount;
 }
 }  // namespace
@@ -55,15 +59,51 @@ uint16_t padInputs(const XINPUT_GAMEPAD& g) {
   return held;
 }
 
-void applyGamepad(const PadInput& keyboard) {
+bool readController(XINPUT_GAMEPAD& out) {
   XINPUT_STATE state{};
-  if (XInputGetState(0, &state) != ERROR_SUCCESS) {
+  if (XInputGetState(0, &state) == ERROR_SUCCESS) return gSource = Source::XInput, out = state.Gamepad, true;
+  gSource = playstationPad(out) ? Source::PlayStation : Source::None;
+  return gSource != Source::None;
+}
+
+namespace {
+PadRumble gSent;  // what the controller was last told
+Source gSentTo = Source::None;
+
+void sendRumble(const PadRumble& r) {
+  if (r == gSent && gSource == gSentTo) return;
+  if (gSentTo != gSource && gSentTo != Source::None) {  // the controller changed: the old one stops
+    if (gSentTo == Source::XInput) {
+      XINPUT_VIBRATION off{};
+      XInputSetState(0, &off);
+    } else {
+      playstationRumble(0, 0);
+    }
+  }
+  gSent = r, gSentTo = gSource;
+  // The DualShock 2's large motor is the low, strong one (an Xbox controller's left motor); its small
+  // one only turns on or off, at full speed (the right, high one).
+  const uint8_t high = r.smallMotor ? 255 : 0;
+  if (gSource == Source::XInput) {
+    XINPUT_VIBRATION v{WORD(r.largeMotor * 257), WORD(high * 257)};
+    XInputSetState(0, &v);
+  } else if (gSource == Source::PlayStation) {
+    playstationRumble(high, r.largeMotor);
+  }
+}
+}  // namespace
+
+void applyRumble() { sendRumble(settings().vibration ? gPadRumble : PadRumble{}); }
+void stopRumble() { sendRumble({}); }
+
+void applyGamepad(const PadInput& keyboard) {
+  XINPUT_GAMEPAD g{};
+  if (!readController(g)) {
     PadInput in = keyboard;
     applyMouse(in);
     gPadInput = in;
     return;
   }
-  const XINPUT_GAMEPAD& g = state.Gamepad;
   const uint16_t held = padInputs(g);
   uint16_t buttons = keyboard.buttons;
   const Settings& s = settings();
@@ -76,8 +116,13 @@ void applyGamepad(const PadInput& keyboard) {
   for (int i = 0; i < 12; ++i)
     if (buttons & kPressure[i]) in.pressure[i] = 255;
   uint8_t lx, ly, rx, ry;
-  stick(g.sThumbLX, g.sThumbLY, XINPUT_GAMEPAD_LEFT_THUMB_DEADZONE, lx, ly);
-  stick(g.sThumbRX, g.sThumbRY, XINPUT_GAMEPAD_RIGHT_THUMB_DEADZONE, rx, ry);
+  // The dead zone: XInput's own for each stick, or the setting's.
+  const SHORT zone = SHORT(std::clamp(s.stickDeadZone, 0, 50) * 32767 / 100);
+  stick(g.sThumbLX, g.sThumbLY, s.stickDeadZone ? zone : SHORT(XINPUT_GAMEPAD_LEFT_THUMB_DEADZONE), lx, ly);
+  stick(g.sThumbRX, g.sThumbRY, s.stickDeadZone ? zone : SHORT(XINPUT_GAMEPAD_RIGHT_THUMB_DEADZONE), rx, ry);
+  // The camera's axes reversed (the right stick's: PS2 values mirrored around the centre).
+  if (s.invertStickX) rx = uint8_t(255 - rx);
+  if (s.invertStickY) ry = uint8_t(255 - ry);
   if (lx != 0x80 || ly != 0x80) in.lx = lx, in.ly = ly;
   if (rx != 0x80 || ry != 0x80) in.rx = rx, in.ry = ry;
   applyMouse(in);

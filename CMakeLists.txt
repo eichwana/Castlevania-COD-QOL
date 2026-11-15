@@ -28,6 +28,7 @@ set(SOURCES
   src/gs/gpu.cpp
   src/gs/frame_gen.cpp
   src/gs/shader_cache.cpp
+  src/gs/button_icons.cpp
   src/gs/texture_pack.cpp
   src/gs/vif.cpp
   src/ipu/ipu.cpp
@@ -45,12 +46,21 @@ set(SOURCES
   src/iop/spu2.cpp
   src/host/sampler.cpp
   src/host/audio.cpp
+  src/host/prologic.cpp
   src/host/gamepad.cpp
+  src/host/playstation_pad.cpp
   src/host/settings.cpp
   src/host/controls_dialog.cpp
   src/host/icon.cpp
   src/host/screenshot.cpp
+  src/host/update_check.cpp
+  src/host/overlay.cpp
+  src/host/discord.cpp
+  src/host/pcsx2_saves.cpp
   src/game/attack_turn.cpp
+  src/game/achievements.cpp
+  src/game/game_info.cpp
+  src/game/speedrun.cpp
   src/game/minimap.cpp
   src/game/mouse_camera.cpp
   src/game/sprint.cpp
@@ -75,7 +85,7 @@ if(MSVC)
 endif()
 
 target_include_directories(codport PRIVATE src)
-target_link_libraries(codport PRIVATE user32 gdi32 comctl32 comdlg32 dbghelp winmm xinput d3d11 dxgi d3dcompiler ole32 windowscodecs)
+target_link_libraries(codport PRIVATE user32 gdi32 comctl32 comdlg32 dbghelp winmm xinput d3d11 dxgi d3dcompiler ole32 shell32 windowscodecs winhttp hid setupapi ws2_32)
 # The game's code: codport_game.dll, built from the player's own disc (the recompiled functions in
 # recomp/gen and the VU micro programs in recomp/vu, written by `codport --recompile` and
 # `--vu-recompile`, see recompile.bat), loaded at start (src/recomp/gamecode.cpp). codport.exe

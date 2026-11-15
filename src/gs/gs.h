@@ -44,6 +44,17 @@ public:
   void frameEnd();  // a frame's drawing is all queued
   void setTextureFilter(bool on) { textureFilter_.store(on, std::memory_order_relaxed); }  // obey TEX1's linear filter (the GPU renderer does)
   void setUiLayer(bool on);  // the drawing that follows is the game's 2D interface: in 16:9, it is narrowed
+  // The prompts' PS2 button icons drawn as an Xbox controller's (gs/button_icons.h); off in replays.
+  std::atomic<bool> xboxIcons{false};
+  std::atomic<bool> hideHud{false};  // photo mode: the interface layer of play frames not drawn
+  // The HUD's size in percent (Settings::hudScale). Each piece of the play frames' interface layer
+  // is resized toward the corner it sits in (the status bars at the top left, the Innocent Devil's
+  // panel at the bottom left, the target's name at the bottom right); pieces anywhere else stay.
+  // A piece: the drawing of the chain tags that touch one another on the screen (as of the frame
+  // before), so a gauge and its frame move together.
+  std::atomic<int> hudScale{100};
+  void setUiPiece(int tag);  // the drawing that follows is from this chain tag of the interface layer
+  void reshow();  // the last picture shown again (photo mode moves over it), GPU only
   double gpuBusySeconds() const;  // the graphics card's working time so far (0 drawing on the CPU)
 
   // What the display circuits show (from PMODE, SMODE2, DISPFB and DISPLAY); false if none is on.
@@ -99,6 +110,19 @@ private:
   std::unique_ptr<GsGpu> gpu_;
   uint32_t clutSlot_ = 0;  // the palette newer primitives use, on the GPU
   bool uiNarrow_ = false;  // see setUiLayer
+  bool uiHidden_ = false;  // in the interface layer with hideHud
+  bool uiLayer_ = false;   // in the interface layer of a play frame
+  int uiPiece_ = -1;       // its chain tag the drawing is from
+  struct UiBox {
+    int32_t x0 = INT32_MAX, y0 = INT32_MAX, x1 = INT32_MIN, y1 = INT32_MIN;
+  };
+  std::vector<UiBox> uiBoxes_;        // per chain tag: what it drew this frame (the game's own coordinates)
+  std::vector<uint8_t> uiCorners_;    // per chain tag: the corner it is resized toward, as of the frame before
+  void resizeHudPiece();              // the queued primitive, toward its piece's corner
+  void endUiLayer();                  // the pieces and their corners for the next frame
+  void writeButtonIcons(uint32_t bp);  // over the icon atlas just uploaded at block `bp`
+  void submitUploadNow();
+  int64_t uiNum_ = 3, uiDen_ = 4;  // the narrowing: 4:3 over the picture's proportion
   std::atomic<bool> textureFilter_{false};  // the window's thread may change it while drawing goes on
   struct Vertex {
     int32_t x, y;  // 12.4 fixed point, window coordinates (XYOFFSET already subtracted)

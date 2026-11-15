@@ -12,3 +12,11 @@
 inline bool gameIsLoading(Memory& mem) {
   return (mem.read<uint32_t>(0x00AED030) & (1u << 15)) != 0 && mem.read<uint32_t>(0x00B06880) == 0;
 }
+
+// Whether the game is in one of its opening's waits, which no button shortens: the memory card
+// check and its message (boot step 3 at 0xAEE444, screen 9 at 0xAED86C, about 220 frames) and the
+// KONAMI logo (step 4, screen 0x26, 256 frames). The same in every boot recorded (PAL and NTSC).
+inline bool gameIsInOpeningWait(Memory& mem) {
+  const uint32_t step = mem.read<uint32_t>(0x00AEE444), screen = mem.read<uint32_t>(0x00AED86C);
+  return (step == 3 && screen == 9) || (step == 4 && screen == 0x26);
+}

@@ -1,2 +1,26 @@
-// The icon of Setup.exe and codport.exe (tools/setup/setup.ico, drawn by draw-icon.py).
+// The icon of Setup.exe and codport.exe (tools/setup/setup.ico, drawn by draw-icon.py), and their version.
+#include "../../src/version.h"
+
 1 ICON "setup.ico"
+
+1 VERSIONINFO
+FILEVERSION CODPORT_VERSION_MAJOR, CODPORT_VERSION_MINOR, CODPORT_VERSION_PATCH, 0
+PRODUCTVERSION CODPORT_VERSION_MAJOR, CODPORT_VERSION_MINOR, CODPORT_VERSION_PATCH, 0
+FILEOS 0x40004
+FILETYPE 0x1
+BEGIN
+  BLOCK "StringFileInfo"
+  BEGIN
+    BLOCK "040904B0"
+    BEGIN
+      VALUE "FileDescription", "Castlevania: Curse of Darkness - Native PC Port"
+      VALUE "ProductName", "Castlevania: Curse of Darkness - Native PC Port"
+      VALUE "FileVersion", CODPORT_VERSION
+      VALUE "ProductVersion", CODPORT_VERSION
+    END
+  END
+  BLOCK "VarFileInfo"
+  BEGIN
+    VALUE "Translation", 0x409, 1200
+  END
+END

@@ -40,6 +40,7 @@ public:
   // while it is on, and tick() then shows the picture of that moment. Empty: stops.
   void onRefresh(std::function<void()> wake);
   void tick();
+  void reshow();  // the last picture presented again (photo mode); not while interpolating
   // Where the game's camera looks in the next picture (radians), or NaN: interpolation follows its
   // turn; and whether the game is being played in it: menus, movies and the like are not interpolated.
   void setView(float yaw, float pitch, bool playing);

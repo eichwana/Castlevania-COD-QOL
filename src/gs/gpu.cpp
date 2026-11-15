@@ -5,7 +5,7 @@
 #include <windows.h>
 #include <d3d11_3.h>
 #include <d3dcompiler.h>
-#include <dxgi1_3.h>
+#include <dxgi1_5.h>
 #include <wrl/client.h>
 
 #include <algorithm>
@@ -30,6 +30,7 @@
 #include "gs/texture_pack.h"
 #include "game/minimap.h"
 #include "host/icon.h"
+#include "host/overlay.h"
 #include "host/screenshot.h"
 #include "host/settings.h"
 #include "host/window.h"
@@ -190,6 +191,8 @@ struct GsGpu::Impl {
   static constexpr size_t kTexCacheBytes = size_t(384) << 20;
   ComPtr<ID3D11ComputeShader> decodeCs;
   ComPtr<ID3D11SamplerState> texSamplers[4];  // linear; bit 0: S clamped, bit 1: T clamped (else repeated)
+  ComPtr<ID3D11SamplerState> anisoSamplers[4];  // the same, anisotropic (Settings::anisotropy), at anisoLevel
+  int anisoLevel = 0;
   ID3D11ShaderResourceView* decoded(const Gs::Draw& d);
   // Texture packs (gs/texture_pack.h): the hash of a texture uploaded whole (with its palette's,
   // if it has one), or 0; the palette content of each slot, likewise; the textures loaded in place
@@ -214,7 +217,23 @@ struct GsGpu::Impl {
   ComPtr<ID3D11BlendState> noWrites;
   ComPtr<ID3D11ComputeShader> uploadCs, copyCs, clutCs, pictureCs, surfacePictureCs;
   ComPtr<ID3D11VertexShader> presentVs;
-  ComPtr<ID3D11PixelShader> presentPs, fpsPs;
+  ComPtr<ID3D11PixelShader> presentPs, fpsPs, overlayPs, fxaaPs;
+  // FXAA (Settings::fxaa): the picture smoothed at its own size before it is scaled to the window.
+  ComPtr<ID3D11Texture2D> fxaaTexture;
+  ComPtr<ID3D11RenderTargetView> fxaaRtv;
+  ComPtr<ID3D11ShaderResourceView> fxaaSrv;
+  UINT fxaaW = 0, fxaaH = 0;
+  ID3D11ShaderResourceView* antialiased(ID3D11ShaderResourceView* srv);
+  // The port's text over the picture (host/overlay.h), a texture per slot.
+  struct OverlayTexture {
+    ComPtr<ID3D11Texture2D> texture;
+    ComPtr<ID3D11ShaderResourceView> srv;
+    uint64_t version = 0;
+    int width = 0, height = 0;
+  };
+  std::array<OverlayTexture, size_t(OverlaySlot::Count)> overlays;
+  // Draws a slot's text with its top at y (its bottom: `above`) and its right edge at x (`fromRight`) or its middle.
+  void drawOverlay(OverlaySlot slot, float x, float y, bool fromRight, bool above);
   // The map in the corner: drawn apart with 4x antialiasing, then over the picture.
   ComPtr<ID3D11VertexShader> mapVs;
   ComPtr<ID3D11PixelShader> mapPs, mapOverPs;
@@ -235,6 +254,7 @@ struct GsGpu::Impl {
   // thread that draws (onRefresh), which shows the picture of that moment (tick): the game's
   // pictures a little late, each moment between two made from them.
   HANDLE refreshWait = nullptr;  // the swap chain's: signalled when it takes another picture
+  bool tearing = false;          // the swap chain may tear (for variable refresh screens)
   std::thread refreshThread;
   std::atomic<bool> refreshStop = false, interpolating = false, ticked = false;  // ticked: a picture shown by tick since interpolation began
   std::mutex callMutex;  // ticks against calls from the EE thread (picture, readMemory)
@@ -273,7 +293,15 @@ struct GsGpu::Impl {
     ComPtr<ID3D11UnorderedAccessView> uav;
     ComPtr<ID3D11Texture2D> copy;  // what a draw into it reads of it
     ComPtr<ID3D11ShaderResourceView> copySrv;
+    uint64_t lastUsed = 0;  // drawBatches when a draw last went into it
   };
+  uint64_t drawBatches = 0;
+  // Surfaces that hold no page any more (what they drew is in memory or in another surface) and
+  // were not drawn into for a while give their textures back: the game draws its effects into
+  // many buffers a page apart, each a whole surface at the drawing resolution, which at 6x came to
+  // gigabytes. A surface that still holds a page keeps everything, so no detail is lost.
+  static constexpr uint64_t kIdleBatches = 600;  // about half a second of drawing
+  void releaseIdle();
   // What a surface holds now in these GS pixels, for a draw into it to read.
   ID3D11ShaderResourceView* snapshot(Surface& sf, int x0, int y0, int x1, int y1);
   ComPtr<ID3D11BlendState> floorBlend;  // MAX of the result and the shader's 0
@@ -371,6 +399,7 @@ struct GsGpu::Impl {
   uint64_t frameNo = 0, gpuFrames = 0;
   std::atomic<double> busySeconds{0};
   double workMs[kWorks] = {};
+  double maxBusyMs = 0;  // the busiest frame since the last report
   bool timing() const {
     static const bool asked = std::getenv("CODPORT_GPU_TIME") != nullptr;
     return hwnd || asked;
@@ -786,6 +815,12 @@ bool GsGpu::Impl::init(void* window, std::string& error) {
   ComPtr<ID3DBlob> fps = compile(gpu_hlsl::kFpsPs, "ps_5_0", error);
   if (!fps) return false;
   dev->CreatePixelShader(fps->GetBufferPointer(), fps->GetBufferSize(), nullptr, &fpsPs);
+  ComPtr<ID3DBlob> fxs = compile(gpu_hlsl::kFxaaPs, "ps_5_0", error);
+  if (!fxs) return false;
+  dev->CreatePixelShader(fxs->GetBufferPointer(), fxs->GetBufferSize(), nullptr, &fxaaPs);
+  ComPtr<ID3DBlob> ops = compile(gpu_hlsl::kOverlayPs, "ps_5_0", error);
+  if (!ops) return false;
+  dev->CreatePixelShader(ops->GetBufferPointer(), ops->GetBufferSize(), nullptr, &overlayPs);
   ComPtr<ID3DBlob> mvs = compile(gpu_hlsl::kMapVs, "vs_5_0", error), mps = compile(gpu_hlsl::kMapPs, "ps_5_0", error), mos = compile(gpu_hlsl::kMapOverPs, "ps_5_0", error);
   if (!mvs || !mps || !mos) return false;
   dev->CreateVertexShader(mvs->GetBufferPointer(), mvs->GetBufferSize(), nullptr, &mapVs);
@@ -856,6 +891,13 @@ bool GsGpu::Impl::init(void* window, std::string& error) {
     scd.Format = DXGI_FORMAT_R8G8B8A8_UNORM, scd.SampleDesc.Count = 1, scd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
     scd.BufferCount = 2, scd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
     scd.Flags = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;  // interpolation's pace
+    // Variable refresh (G-Sync, FreeSync; Settings::variableRefresh): presents may tear, so a
+    // screen that follows the game's pace shows each picture the moment it is ready.
+    if (ComPtr<IDXGIFactory5> f5; SUCCEEDED(factory.As(&f5))) {
+      BOOL allowed = FALSE;
+      if (SUCCEEDED(f5->CheckFeatureSupport(DXGI_FEATURE_PRESENT_ALLOW_TEARING, &allowed, sizeof(allowed))) && allowed)
+        scd.Flags |= DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING, tearing = true;
+    }
     if (FAILED(factory->CreateSwapChainForHwnd(dev.Get(), hwnd, &scd, nullptr, nullptr, &swapChain)))
       return error = "no swap chain for the window", false;
     factory->MakeWindowAssociation(hwnd, DXGI_MWA_NO_ALT_ENTER);
@@ -1030,15 +1072,16 @@ int GsGpu::Impl::surfaceFor(uint32_t bp, uint32_t bw, uint32_t psm, bool depth, 
   }
   if (index >= 0) {
     Surface& sf = surfaces[size_t(index)];
-    if (sf.width >= width && sf.height >= height) return index;
+    if (sf.width >= width && sf.height >= height) return sf.lastUsed = drawBatches, index;
     // Too small: its pixels go to memory and it starts again, larger, from there.
     flush(index);
     for (size_t p = 0; p < 512; ++p)
       if (owner[p] == index) owner[p] = -1, ownerStale.reset(p), held.reset(p);
     width = std::max(width, sf.width), height = std::max(height, sf.height);
   } else {
-    index = int(surfaces.size());
-    surfaces.push_back({});
+    for (size_t i = 0; i < surfaces.size() && index < 0; ++i)
+      if (!surfaces[i].tex) index = int(i);
+    if (index < 0) index = int(surfaces.size()), surfaces.push_back({});
   }
   Surface& sf = surfaces[size_t(index)];
   sf = Surface{bp, bw, psm, depth, count, width, height};
@@ -1062,6 +1105,7 @@ int GsGpu::Impl::surfaceFor(uint32_t bp, uint32_t bw, uint32_t psm, bool depth, 
     dev->CreateShaderResourceView(sf.tex.Get(), nullptr, &sf.srv);
     dev->CreateUnorderedAccessView(sf.tex.Get(), nullptr, &sf.uav);
   }
+  sf.lastUsed = drawBatches;
   return index;
 }
 
@@ -1317,7 +1361,7 @@ void GsGpu::Impl::dispatch(ID3D11ComputeShader* cs, ID3D11ShaderResourceView* sr
 std::unique_ptr<GsGpu> GsGpu::create(void* window, uint32_t scale, std::string& error) {
   std::unique_ptr<GsGpu> gpu(new GsGpu);
   gpu->impl_ = std::make_unique<Impl>();
-  gpu->impl_->scale = std::clamp(scale, 1u, 4u);
+  gpu->impl_->scale = std::clamp(scale, 1u, 6u);
   if (!gpu->impl_->init(window, error)) return nullptr;
   if (window) {  // texture packs in textures/ next to the memory card folder (not in headless runs)
     std::filesystem::path dir = iconFile().parent_path();
@@ -1333,6 +1377,34 @@ GsGpu::~GsGpu() {
     std::printf("   GPU: %llu hardware draw calls (%llu runs at the GS's resolution), %llu GS-memory ones, %llu surface syncs, %zu surfaces\n",
                 (unsigned long long)impl_->fastDraws, (unsigned long long)impl_->lowResRuns, (unsigned long long)impl_->slowDraws, (unsigned long long)impl_->syncs,
                 impl_->surfaces.size());
+  if (impl_ && std::getenv("CODPORT_GPU_STATS")) {  // where the video memory goes
+    auto bytesOf = [](ID3D11Texture2D* t) -> uint64_t {
+      if (!t) return 0;
+      D3D11_TEXTURE2D_DESC d;
+      t->GetDesc(&d);
+      const uint64_t px = uint64_t(d.Width) * d.Height;
+      switch (d.Format) {
+        case DXGI_FORMAT_R16G16B16A16_SNORM: case DXGI_FORMAT_R16G16B16A16_FLOAT: return px * 8;
+        case DXGI_FORMAT_R16_TYPELESS: return px * 2;
+        case DXGI_FORMAT_R8_UNORM: return px;
+        default: return px * 4;
+      }
+    };
+    uint64_t colour = 0, depth = 0, copies = 0;
+    for (const Impl::Surface& sf : impl_->surfaces) {
+      (sf.depth ? depth : colour) += bytesOf(sf.tex.Get());
+      copies += bytesOf(sf.copy.Get());
+      size_t owned = 0;
+      for (size_t p = 0; p < 512; ++p) owned += impl_->owner[p] == int(&sf - impl_->surfaces.data());
+      std::printf("     surface bp %4u bw %2u psm %02X %4ux%-4u%s%s owns %3zu pages, used %llu batches ago\n", sf.bp, sf.bw, sf.psm, sf.width,
+                  sf.height, sf.depth ? " depth" : "", sf.copy ? " +copy" : "", owned, (unsigned long long)(impl_->drawBatches - sf.lastUsed));
+    }
+    D3D11_BUFFER_DESC bd{};
+    impl_->mem->GetDesc(&bd);
+    std::printf("   video memory (MB): surfaces %.0f colour + %.0f depth, their copies %.0f, GS memory %.0f, low-res %.0f\n", colour / 1048576.0,
+                depth / 1048576.0, copies / 1048576.0, bd.ByteWidth / 1048576.0,
+                (bytesOf(impl_->lowTex.Get()) + bytesOf(impl_->lowLastTex.Get())) / 1048576.0);
+  }
 }
 
 void GsGpu::draw(const std::vector<Gs::Command>& commands) {
@@ -1343,6 +1415,7 @@ void GsGpu::draw(const std::vector<Gs::Command>& commands) {
   prims.clear(), verts.clear(), firstVertex.clear();
   const float scale = float(m.scale);
   std::vector<uint8_t>& ways = m.ways;
+  ++m.drawBatches;
   ways.resize(commands.size());
   for (size_t k = 0; k < commands.size(); ++k) {
     ways[k] = m.fast(commands[k]);
@@ -1512,6 +1585,19 @@ void GsGpu::draw(const std::vector<Gs::Command>& commands) {
     }
     i = j;
   }
+  if (m.drawBatches % 64 == 0) m.releaseIdle();
+}
+
+void GsGpu::Impl::releaseIdle() {
+  std::vector<uint16_t> owned(surfaces.size(), 0);
+  for (size_t p = 0; p < 512; ++p)
+    if (owner[p] >= 0) ++owned[size_t(owner[p])];
+  for (size_t i = 0; i < surfaces.size(); ++i) {
+    Surface& sf = surfaces[i];
+    if (!sf.tex || owned[i] || drawBatches - sf.lastUsed < kIdleBatches || int(i) == lastDepth || int(i) == sceneDepthOf) continue;
+    sf = Surface{~0u, 0, 0, sf.depth, false, 0, 0};  // nothing left: no draw finds it, its slot is taken again
+    if (i < drew3D.size()) drew3D[i] = 0;
+  }
 }
 
 bool GsGpu::Impl::sameRun(const Gs::Draw& a, const Gs::Draw& b) {
@@ -1557,6 +1643,20 @@ void GsGpu::Impl::drawStates(size_t first, size_t end) {
   ctx->PSSetConstantBuffers(2, 1, primStateBuffer.GetAddressOf());
   ID3D11ShaderResourceView* bound = nullptr;
   int boundSampler = -1;
+  // The anisotropic filter: the textures' level 0 sampled along the slant (oblique floors and walls
+  // shimmer less in the distance); made again when its level changes.
+  const int aniso = std::clamp(settings().anisotropy, 0, 16);
+  if (aniso > 1 && aniso != anisoLevel) {
+    for (int i = 0; i < 4; ++i) {
+      D3D11_SAMPLER_DESC ts{};
+      texSamplers[i]->GetDesc(&ts);
+      ts.Filter = D3D11_FILTER_ANISOTROPIC, ts.MaxAnisotropy = UINT(aniso);
+      anisoSamplers[i].Reset();
+      dev->CreateSamplerState(&ts, &anisoSamplers[i]);
+    }
+    anisoLevel = aniso;
+  }
+  ComPtr<ID3D11SamplerState>* samplers = aniso > 1 && anisoSamplers[0] ? anisoSamplers : texSamplers;
   for (size_t k = first; k < end;) {
     const uint32_t id = commandState[k];
     size_t e = k + 1;
@@ -1565,7 +1665,7 @@ void GsGpu::Impl::drawStates(size_t first, size_t end) {
     if (n && (states[id].flags & F_CACHED)) {
       if (stateTex[id] != bound) ctx->PSSetShaderResources(6, 1, &stateTex[id]), bound = stateTex[id];
       const int s = (states[id].wms == 1 ? 1 : 0) | (states[id].wmt == 1 ? 2 : 0);
-      if (s != boundSampler) ctx->PSSetSamplers(0, 1, texSamplers[s].GetAddressOf()), boundSampler = s;
+      if (s != boundSampler) ctx->PSSetSamplers(0, 1, samplers[s].GetAddressOf()), boundSampler = s;
     }
     if (n) {
       D3D11_MAPPED_SUBRESOURCE map;
@@ -2214,6 +2314,7 @@ void GsGpu::Impl::frameTimer() {
       prev = at;
     }
     busySeconds = busySeconds + busy / 1000.0;
+    maxBusyMs = std::max(maxBusyMs, busy);
     ++gpuFrames;
     s.works.clear();
     s.pending = false;
@@ -2223,18 +2324,55 @@ void GsGpu::Impl::frameTimer() {
     if (report) {
       double total = 0;
       for (int w = 1; w < kWorks; ++w) total += workMs[w];
-      std::printf("   GPU busy %.2f ms/frame (frames %llu-%llu):", total / double(gpuFrames), (unsigned long long)(frameNo - 100), (unsigned long long)frameNo);
+      std::printf("   GPU busy %.2f ms/frame, max %.2f (frames %llu-%llu):", total / double(gpuFrames), maxBusyMs, (unsigned long long)(frameNo - 100),
+                  (unsigned long long)frameNo);
       static const char* const names[kWorks] = {"waiting", "GS-memory draws", "hardware draws", "to memory", "from memory", "uploads", "copies", "palettes", "picture"};
       for (int w = 0; w < kWorks; ++w) std::printf(" %s %.2f,", names[w], workMs[w] / double(gpuFrames));
       std::printf("\n");
     }
     for (double& ms : workMs) ms = 0;
-    gpuFrames = 0;
+    gpuFrames = 0, maxBusyMs = 0;
   }
 }
 
 void GsGpu::frameEnd() { impl_->frameTimer(); }
 double GsGpu::busySeconds() const { return impl_->busySeconds; }
+
+void GsGpu::Impl::drawOverlay(OverlaySlot slot, float x, float y, bool fromRight, bool above) {
+  OverlayTexture& o = overlays[size_t(slot)];
+  const OverlayImage image = overlayImage(slot, o.version);
+  if (image.alpha <= 0 || image.width <= 0 || image.height <= 0) return;
+  if (image.version != o.version) {
+    o.texture.Reset(), o.srv.Reset();
+    o.version = image.version, o.width = image.width, o.height = image.height;
+    D3D11_TEXTURE2D_DESC td{};
+    td.Width = UINT(image.width), td.Height = UINT(image.height), td.MipLevels = 1, td.ArraySize = 1;
+    td.Format = DXGI_FORMAT_R8G8B8A8_UNORM, td.SampleDesc.Count = 1;
+    td.Usage = D3D11_USAGE_IMMUTABLE, td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    const D3D11_SUBRESOURCE_DATA data{image.rgba.data(), UINT(image.width * 4), 0};
+    if (FAILED(dev->CreateTexture2D(&td, &data, &o.texture)) || FAILED(dev->CreateShaderResourceView(o.texture.Get(), nullptr, &o.srv))) {
+      o.texture.Reset(), o.srv.Reset();
+      return;
+    }
+  }
+  if (!o.srv) return;
+  const float w = float(o.width), hgt = float(o.height);
+  const float left = fromRight ? x - w : x - w / 2, top = above ? y - hgt : y;
+  const D3D11_VIEWPORT at{std::floor(left), std::floor(top), w, hgt, 0, 1};
+  ctx->RSSetViewports(1, &at);
+  ctx->VSSetShader(presentVs.Get(), nullptr, 0);
+  ctx->PSSetShader(overlayPs.Get(), nullptr, 0);
+  const float look[4] = {image.alpha, 0, 0, 0};
+  setConstants(look, sizeof(look));
+  ctx->PSSetConstantBuffers(0, 1, constants.GetAddressOf());
+  ctx->PSSetSamplers(0, 1, pointSampler.GetAddressOf());
+  ctx->PSSetShaderResources(0, 1, o.srv.GetAddressOf());
+  ctx->OMSetBlendState(overBlend.Get(), nullptr, 0xFFFFFFFF);
+  ctx->Draw(3, 0);
+  ctx->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF);
+  ID3D11ShaderResourceView* none = nullptr;
+  ctx->PSSetShaderResources(0, 1, &none);
+}
 
 void GsGpu::Impl::drawMap(const MinimapView& view, float left, float top, uint32_t size) {
   ID3D11DeviceContext* c = ctx.Get();
@@ -2312,7 +2450,8 @@ bool GsGpu::Impl::target(RECT& rc) {
     backBuffer.Reset();
     ctx->OMSetRenderTargets(0, nullptr, nullptr);
     if (FAILED(swapChain->ResizeBuffers(0, UINT(rc.right), UINT(rc.bottom), DXGI_FORMAT_UNKNOWN,
-                                        refreshWait ? DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT : 0)))
+                                        (refreshWait ? DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT : 0) |
+                                            (tearing ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0))))
       return false;
     ComPtr<ID3D11Texture2D> back;
     swapChain->GetBuffer(0, IID_PPV_ARGS(&back));
@@ -2343,7 +2482,7 @@ void GsGpu::present(const Gs::Display& d, uint64_t stamp) {
   const bool interpolate = settings().interpolation && m.playing && m.refreshThread.joinable() && m.refreshHz >= gameHz * 1.5 && gap > 0.011 && m.generator();
   m.fps = fpsText(interpolate ? m.refreshHz / gameHz : 1);
   if (interpolate) {
-    m.view.wide = wideScreen();
+    m.view.narrow = narrowing(pictureAspect());
     const Impl::PictureDepth z = m.pictureDepth();
     m.frameGen->push(m.picture.Get(), m.pictureW, m.pictureH, m.scale, m.view, z.depth, m.scale, z.scene);
     m.stampA = m.stampB, m.stampB = at;
@@ -2358,7 +2497,7 @@ void GsGpu::present(const Gs::Display& d, uint64_t stamp) {
   RECT rc;
   if (!m.target(rc)) return;
   m.show(m.pictureSrv.Get(), rc);
-  m.swapChain->Present(0, 0);
+  m.swapChain->Present(0, m.tearing && settings().variableRefresh ? DXGI_PRESENT_ALLOW_TEARING : 0);
 }
 
 void GsGpu::tick() {
@@ -2372,14 +2511,25 @@ void GsGpu::tick() {
   const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
   const double moment = now - m.frameSeconds - m.lag - 0.001;
   const double t = m.stampB > m.stampA ? std::clamp((moment - m.stampA) / (m.stampB - m.stampA), 0.0, 1.0) : 1.0;
-  const int aw = wideScreen() ? 16 : 4, ah = wideScreen() ? 9 : 3;  // made as large as show() shows it
+  const Aspect a = pictureAspect();  // made as large as show() shows it
+  const int64_t aw = a.w, ah = a.h;
   int w = rc.right, h = rc.bottom;
-  if (w * ah > h * aw) w = h * aw / ah; else h = w * ah / aw;
+  if (w * ah > h * aw) w = int(h * aw / ah); else h = int(w * ah / aw);
   ID3D11ShaderResourceView* made = m.frameGen->make(float(t), uint32_t(w), uint32_t(h));
   if (!made) return;
   m.show(made, rc);
   m.swapChain->Present(1, 0);
   m.ticked = true;
+}
+
+void GsGpu::reshow() {
+  Impl& m = *impl_;
+  std::lock_guard lock(m.callMutex);
+  if (m.interpolating || !m.pictureSrv) return;  // the refresh thread shows it (tick) as it is
+  RECT rc;
+  if (!m.target(rc)) return;
+  m.show(m.pictureSrv.Get(), rc);
+  m.swapChain->Present(0, 0);
 }
 
 void GsGpu::setView(float yaw, float pitch, bool playing) {
@@ -2403,11 +2553,52 @@ void GsGpu::onRefresh(std::function<void()> wake) {
   });
 }
 
+ID3D11ShaderResourceView* GsGpu::Impl::antialiased(ID3D11ShaderResourceView* srv) {
+  ComPtr<ID3D11Resource> resource;
+  srv->GetResource(&resource);
+  ComPtr<ID3D11Texture2D> source;
+  if (FAILED(resource.As(&source))) return srv;
+  D3D11_TEXTURE2D_DESC sd{};
+  source->GetDesc(&sd);
+  if (sd.Width != fxaaW || sd.Height != fxaaH || !fxaaTexture) {
+    fxaaTexture.Reset(), fxaaRtv.Reset(), fxaaSrv.Reset();
+    D3D11_TEXTURE2D_DESC td{};
+    td.Width = sd.Width, td.Height = sd.Height, td.MipLevels = 1, td.ArraySize = 1, td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    td.SampleDesc.Count = 1, td.Usage = D3D11_USAGE_DEFAULT, td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+    if (FAILED(dev->CreateTexture2D(&td, nullptr, &fxaaTexture)) || FAILED(dev->CreateRenderTargetView(fxaaTexture.Get(), nullptr, &fxaaRtv)) ||
+        FAILED(dev->CreateShaderResourceView(fxaaTexture.Get(), nullptr, &fxaaSrv)))
+      return fxaaTexture.Reset(), srv;
+    fxaaW = sd.Width, fxaaH = sd.Height;
+  }
+  const D3D11_VIEWPORT all{0, 0, float(sd.Width), float(sd.Height), 0, 1};
+  ctx->RSSetViewports(1, &all);
+  ctx->RSSetState(rasterizer.Get());
+  ctx->OMSetRenderTargets(1, fxaaRtv.GetAddressOf(), nullptr);
+  ctx->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF);
+  ctx->IASetInputLayout(nullptr);
+  ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+  ctx->VSSetShader(presentVs.Get(), nullptr, 0);
+  ctx->PSSetShader(fxaaPs.Get(), nullptr, 0);
+  ctx->PSSetShaderResources(0, 1, &srv);
+  const float texel[4] = {1.0f / float(sd.Width), 1.0f / float(sd.Height), 0, 0};
+  setConstants(texel, sizeof(texel));
+  ctx->PSSetConstantBuffers(0, 1, constants.GetAddressOf());
+  ctx->PSSetSamplers(0, 1, linearSampler.GetAddressOf());
+  ctx->Draw(3, 0);
+  ID3D11ShaderResourceView* none = nullptr;
+  ctx->PSSetShaderResources(0, 1, &none);
+  ctx->OMSetRenderTargets(0, nullptr, nullptr);
+  return fxaaSrv.Get();
+}
+
 void GsGpu::Impl::show(ID3D11ShaderResourceView* srv, const RECT& rc) {
   // The PS2 picture is 4:3 (or 16:9, F10) whatever its size in pixels; it is centred with black bars.
-  const int aw = wideScreen() ? 16 : 4, ah = wideScreen() ? 9 : 3;
+  const Aspect a = pictureAspect();
+  const int64_t aw = a.w, ah = a.h;
   int w = rc.right, h = rc.bottom;
-  if (w * ah > h * aw) w = h * aw / ah; else h = w * ah / aw;
+  if (w * ah > h * aw) w = int(h * aw / ah); else h = int(w * ah / aw);
+  const Settings& look = settings();
+  if (look.fxaa) srv = antialiased(srv);
   const float black[4] = {0, 0, 0, 1};
   ctx->ClearRenderTargetView(backBuffer.Get(), black);
   const D3D11_VIEWPORT vp{float((rc.right - w) / 2), float((rc.bottom - h) / 2), float(w), float(h), 0, 1};
@@ -2419,6 +2610,13 @@ void GsGpu::Impl::show(ID3D11ShaderResourceView* srv, const RECT& rc) {
   ctx->VSSetShader(presentVs.Get(), nullptr, 0);
   ctx->PSSetShader(presentPs.Get(), nullptr, 0);
   ctx->PSSetShaderResources(0, 1, &srv);
+  // The look: brightness (brighter: an exponent below 1), sharpening, the TV filter, colours for colour blindness.
+  const PhotoView photo = photoView();
+  const float constantsLook[12] = {100.0f / float(std::clamp(look.brightness, 50, 200)), float(std::clamp(look.sharpness, 0, 100)) / 100.0f,
+                                  look.crt ? 1.0f : 0.0f, float(std::clamp(look.colourBlind, 0, 3)), 1.0f / float(w), 1.0f / float(h), 224.0f, 0,
+                                  photo.zoom, photo.x, photo.y, 0};
+  setConstants(constantsLook, sizeof(constantsLook));
+  ctx->PSSetConstantBuffers(0, 1, constants.GetAddressOf());
   // Pixel for pixel at 1x as before; a larger picture is filtered down (or up) to the window.
   ctx->PSSetSamplers(0, 1, (scale > 1 ? linearSampler : pointSampler).GetAddressOf());
   ctx->Draw(3, 0);
@@ -2427,11 +2625,21 @@ void GsGpu::Impl::show(ID3D11ShaderResourceView* srv, const RECT& rc) {
   const D3D11_VIEWPORT whole{0, 0, float(rc.right), float(rc.bottom), 0, 1};
   ctx->RSSetViewports(1, &whole);
   const float pictureRight = vp.TopLeftX + vp.Width, cellHeight = float(std::max(2, int(rc.bottom) / 180));
-  if (const MinimapView view = minimapView(mapVertices, mapVersion); view.visible) {
+  if (const MinimapView view = minimapView(mapVertices, mapVersion); view.visible && !photo.on) {
     const uint32_t size = uint32_t(std::max(64.0f, float(h) * 0.26f));
     const float margin = float(h) * 0.02f;  // and below the counter, in the same corner
     drawMap(view, pictureRight - float(size) - margin, vp.TopLeftY + std::max(margin, cellHeight * 8), size);
     ctx->VSSetShader(presentVs.Get(), nullptr, 0);
+  }
+  // The port's text: the speedrun timer at the right under the minimap's place, notices at the
+  // bottom in the middle (the game keeps the corners and the top: its HUD, the Innocent Devil's
+  // panel, the target's name at the bottom right). In screenshots, unlike the counter.
+  if (!photo.on) {
+    const float margin = float(h) * 0.02f, mapSize = std::max(64.0f, float(h) * 0.26f);
+    drawOverlay(OverlaySlot::Timer, pictureRight - margin, vp.TopLeftY + std::max(margin, cellHeight * 8) + mapSize + margin, true, false);
+    drawOverlay(OverlaySlot::Notice, vp.TopLeftX + vp.Width / 2, vp.TopLeftY + vp.Height - margin * 2, false, true);
+    ctx->VSSetShader(presentVs.Get(), nullptr, 0);
+    ctx->RSSetViewports(1, &whole);
   }
   // A screenshot asked for (F12, --shot): the window as shown so far, without the counter.
   if (std::filesystem::path file; takeScreenshotRequest(file)) {
@@ -2450,7 +2658,7 @@ void GsGpu::Impl::show(ID3D11ShaderResourceView* srv, const RECT& rc) {
       }
     }
   }
-  if (const std::string& text = fps; !text.empty()) {  // the counter, in the window's top right corner
+  if (const std::string& text = fps; !text.empty() && !photo.on) {  // the counter, in the window's top right corner
     const float cell = float(std::max(2, int(rc.bottom) / 180));
     struct {
       float x, y, cell;
@@ -2507,7 +2715,7 @@ uint32_t GsGpu::picture(const Gs::Display& d, std::vector<uint32_t>& rgba) {
   if (!m.makePicture(d, scale)) return scale;
   // For testing interpolation: the picture halfway from the last one, as build/frames/mid-N.png.
   if (static const bool mid = std::getenv("CODPORT_INTERP_DUMP") != nullptr; mid && m.generator()) {
-    m.view.wide = wideScreen();
+    m.view.narrow = narrowing(pictureAspect());
     const Impl::PictureDepth z = m.pictureDepth();
     m.frameGen->push(m.picture.Get(), w, h, scale, m.view, z.depth, m.scale, z.scene);
     if (ID3D11ShaderResourceView* made = m.frameGen->ready() ? m.frameGen->make(0.5f, w, h) : nullptr) {
