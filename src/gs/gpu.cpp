@@ -2993,7 +2993,8 @@ void GsGpu::Impl::show(ID3D11ShaderResourceView* srv, const RECT& rc) {
   const D3D11_VIEWPORT whole{0, 0, float(rc.right), float(rc.bottom), 0, 1};
   ctx->RSSetViewports(1, &whole);
   const float pictureRight = vp.TopLeftX + vp.Width, cellHeight = float(std::max(2, int(rc.bottom) / 180));
-  if (const MinimapView view = minimapView(mapVertices, mapVersion); view.visible && !photo.on) {
+  const MinimapView view = minimapView(mapVertices, mapVersion);
+  if (view.visible && !photo.on) {
     const uint32_t size = uint32_t(std::max(64.0f, float(h) * 0.26f));
     const float margin = float(h) * 0.02f;  // and below the counter, in the same corner
     drawMap(view, pictureRight - float(size) - margin, vp.TopLeftY + std::max(margin, cellHeight * 8), size);
@@ -3001,11 +3002,13 @@ void GsGpu::Impl::show(ID3D11ShaderResourceView* srv, const RECT& rc) {
   }
   // The port's text: the speedrun timer at the right under the minimap's place, notices at the
   // bottom in the middle (the game keeps the corners and the top: its HUD, the Innocent Devil's
-  // panel, the target's name at the bottom right). In screenshots, unlike the counter.
+  // panel, the target's name at the bottom right), the build's notice at the top right, beside
+  // the minimap when it is there. In screenshots, unlike the counter.
   if (!photo.on) {
-    const float margin = float(h) * 0.02f, mapSize = std::max(64.0f, float(h) * 0.26f);
-    drawOverlay(OverlaySlot::Timer, pictureRight - margin, vp.TopLeftY + std::max(margin, cellHeight * 8) + mapSize + margin, true, false);
+    const float margin = float(h) * 0.02f, mapSize = std::max(64.0f, float(h) * 0.26f), top = vp.TopLeftY + std::max(margin, cellHeight * 8);
+    drawOverlay(OverlaySlot::Timer, pictureRight - margin, top + mapSize + margin, true, false);
     drawOverlay(OverlaySlot::Notice, vp.TopLeftX + vp.Width / 2, vp.TopLeftY + vp.Height - margin * 2, false, true);
+    drawOverlay(OverlaySlot::Build, pictureRight - margin - (view.visible ? mapSize + margin : 0), top, true, false);
     ctx->VSSetShader(presentVs.Get(), nullptr, 0);
     ctx->RSSetViewports(1, &whole);
   }

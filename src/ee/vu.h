@@ -120,7 +120,8 @@ public:
   struct BlockCache {
     uint64_t generation = 0;
     BlockFn fn = nullptr;
-    std::vector<uint8_t> code;  // the words `fn` was found for: still them, still it (no new lookup)
+    uint32_t registry = ~0u;    // the compiled blocks' version `fn` (or that there is none) was looked up in
+    std::vector<uint8_t> code;  // the words it was looked up for: still them in that version, still it
   };
   std::vector<BlockCache> blocks_;
   bool blockEnded_ = false;  // the block ran the program's last pair

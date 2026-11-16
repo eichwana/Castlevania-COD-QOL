@@ -177,6 +177,10 @@ void Settings::load(const std::filesystem::path& from) {
       iso = value;
       continue;
     }
+    if (section == "disco" && key == "limitar_compilacoes") {
+      limitBuildJobs = value != "0";
+      continue;
+    }
     if (section == "janela") {
       if (key == "tela_cheia") fullscreen = value == "1";
       if (key == "tamanho_janela") {
@@ -256,61 +260,121 @@ void Settings::load(const std::filesystem::path& from) {
 void Settings::save() const {
   if (file.empty()) return;
   std::ofstream out(file);
-  out << "# Configuracoes do port. Tudo isto tambem muda com F1 dentro do jogo.\n"
-         "# Teclado: letras, numeros, F1-F24, Num0-Num9, Enter, Espaco, Backspace, Tab, Esc, Shift, Ctrl,\n"
-         "# Alt, Cima, Baixo, Esquerda, Direita... Controle (Xbox): A, B, X, Y, LB, RB, LT, RT, Back, Start,\n"
-         "# LS, RS, Cima, Baixo, Esquerda, Direita. Vazio = nenhuma.\n\n";
-  out << "[disco]\n# A imagem do disco do jogo (SLES-53755); vazio = o primeiro .iso desta pasta ou de uma acima\niso=" << iso
-      << "\n\n";
-  out << "[janela]\n# Ao abrir o jogo, pergunta ao GitHub se saiu uma versao nova do port (e avisa no titulo e no F1)\n"
-         "avisar_versao_nova=" << (checkUpdates ? 1 : 0) << "\ntela_cheia=" << (fullscreen ? 1 : 0)
-      << "\n# Tamanho da janela fora da tela cheia, em pixels (em tela cheia vale o do monitor)\ntamanho_janela=" << windowWidth << 'x'
-      << windowHeight << "\n# Onde a janela estava (canto superior esquerdo, em pixels da area de trabalho); vazio = no meio da tela\nposicao_janela="
-      << (windowX == kNoPlace ? std::string() : std::to_string(windowX) + "," + std::to_string(windowY)) << "\n# Proporcao: 4:3, 16:9 ou ultrawide (tao larga quanto a tela, 21:9 ou 32:9)\nproporcao=" << (!wide ? "4:3" : ultrawide ? "ultrawide" : "16:9")
-      << "\n# Resolucao do desenho: 1 = a do PS2; 2 a 6 = tantas vezes mais nitida (pesa mais na placa de\n"
-         "# video; o 6x usa uns 1,5 GB de memoria de video nas cenas mais pesadas)\nresolucao="
-      << scale << "\n# Quadros por segundo no canto superior direito (F9 liga e desliga)\nmostrar_fps=" << (showFps ? 1 : 0)
-      << "\n# Brilho da imagem em porcento (100 = como o jogo desenha; mais claro acima, mais escuro abaixo)\nbrilho=" << brightness
-      << "\n# Volume do som em porcento\nvolume=" << volume
-      << "\n# Interpolação: quadros feitos entre os do jogo, em telas de 100 Hz ou mais (atrasa a imagem um pouco)\ninterpolacao="
-      << (interpolation ? 1 : 0)
-      << "\n# Anti-aliasing FXAA: suaviza os serrilhados da imagem\nfxaa=" << (fxaa ? 1 : 0)
-      << "\n# Nitidez em porcento (0 = desligada)\nnitidez=" << sharpness << "\n# Filtro de TV de tubo (linhas e mascara)\nfiltro_crt=" << (crt ? 1 : 0)
-      << "\n# Cores para daltonismo: 0 = nenhum, 1 = protanopia, 2 = deuteranopia, 3 = tritanopia\ndaltonismo=" << colourBlind
-      << "\n# Monitor com G-Sync ou FreeSync: cada imagem aparece assim que fica pronta (em outros monitores rasga)\ntaxa_variavel="
-      << (variableRefresh ? 1 : 0) << "\n# Baixa latencia: os controles sao lidos logo antes de cada quadro do jogo\nbaixa_latencia=" << (lowLatency ? 1 : 0)
-      << "\n# Tamanho da HUD durante o jogo em porcento (80 a 125; cada parte cresce a partir do seu canto)\ntamanho_hud=" << hudScale
-      << "\n# Idioma das opcoes e controles (F1): pt ou en / Language of the options and controls (F1): pt or en\nidioma=" << language
-      << "\n\n[jogo]\n# Com um inimigo travado, os ataques viram para ele\nataque_no_alvo=" << (attackTurn ? 1 : 0)
-      << "\n# O controle vibra quando o jogo faz o DualShock 2 vibrar\nvibracao=" << (vibration ? 1 : 0)
-      << "\n# Icones de botao do Xbox (A, B, X, Y, LB...) no lugar dos do PS2 nos avisos do jogo\nicones_xbox=" << (xboxIcons ? 1 : 0)
-      << "\n# L3 (apertar o analogico esquerdo) liga e desliga a corrida mais rapida\ncorrida=" << (sprint ? 1 : 0)
-      << "\n# Texturas suavizadas como no PS2; 0 = pixels duros\nfiltro_textura=" << (textureFilter ? 1 : 0)
-      << "\n# Filtro anisotropico: 2, 4, 8 ou 16 (o chao e as paredes em angulo cintilam menos de longe); 0 = como o PS2\nfiltro_anisotropico="
-      << anisotropy << "\n# Portas e telas de Loading sem esperar o tempo real; a musica e o som da porta somem\ncarregamento_rapido=" << (fastLoading ? 1 : 0)
-      << "\n# Abertura sem esperar: a checagem do cartao de memoria e o logo da KONAMI passam na hora\nabertura_rapida=" << (fastOpening ? 1 : 0)
-      << "\n# Mapa no canto da tela (F8 liga e desliga)\nminimapa=" << (minimap ? 1 : 0)
-      << "\n# Pacote de texturas: as imagens de textures\\replace no lugar das do jogo (vale ao abrir o jogo)\npacote_texturas="
-      << (texturePack ? 1 : 0)
-      << "\n# Salva as texturas do jogo em textures\\dump, para fazer um pacote (vale ao abrir o jogo)\nsalvar_texturas="
-      << (dumpTextures ? 1 : 0)
-      << "\n\n[mouse]\n# O mouse gira a camera (o analogico direito); Esc solta o cursor, um clique na janela prende de novo\n"
-         "camera_com_mouse=" << (mouseCamera ? 1 : 0)
-      << "\n# De 1 a 10\nsensibilidade=" << mouseSensitivity
-      << "\n# 1 = empurrar o mouse para a frente olha para baixo\ninverter_vertical=" << (invertMouseY ? 1 : 0)
-      << "\n# 1 = mover o mouse para a direita gira a camera para a esquerda\ninverter_horizontal=" << (invertMouseX ? 1 : 0)
-      << "\n\n[controle_ajustes]\n# Zona morta dos analogicos em porcento (0 = a do XInput, 24 e 27)\nzona_morta=" << stickDeadZone
-      << "\n# Velocidade da camera no analogico direito, em porcento da do jogo (acima de 100, mais rapida que o jogo gira)\nvelocidade_camera="
-      << stickCameraSpeed << "\ninverter_camera_horizontal=" << (invertStickX ? 1 : 0) << "\ninverter_camera_vertical=" << (invertStickY ? 1 : 0)
-      << "\n\n[som]\n# Saida de som pelo nome (vazio = a padrao do Windows)\ndispositivo=" << audioDevice
-      << "\n# Som 5.1: o Pro Logic II do jogo (escolha Pro Logic II nas opcoes de som dele) aberto em 6 canais\nsurround_51=" << (surround ? 1 : 0)
-      << "\n\n[extras]\n# Cronometro de speedrun no canto (F7): o tempo do jogo desde que ele comecou, sem os carregamentos\ncronometro="
-      << (speedrunTimer ? 1 : 0)
-      << "\n# O LiveSplit segue o cronometro (ligue o LiveSplit Server nele: Control > Start TCP Server, porta 16834)\nlivesplit="
-      << (liveSplit ? 1 : 0) << "\n# Aviso na tela quando uma conquista do port e alcancada\navisos_conquistas=" << (achievementNotices ? 1 : 0)
-      << "\n# Mostrar no Discord a area e o nivel do Hector\ndiscord=" << (discord ? 1 : 0)
-      << "\n# Id do aplicativo do Discord (vazio = o do port)\ndiscord_id_aplicativo=" << (discordClientId == kDiscordClientId ? "" : discordClientId)
-      << "\n\n[teclado]\n";
+  // The comments in the language of the options (the names and values stay the same in both).
+  const bool en = language == "en";
+  auto note = [en](const char* pt, const char* english) { return std::string("# ") + (en ? english : pt) + "\n"; };
+  out << note("Configuracoes do port. Tudo isto tambem muda com F1 dentro do jogo.",
+              "The port's settings. All of this also changes with F1 in the game.")
+      << note("Teclado: letras, numeros, F1-F24, Num0-Num9, Enter, Espaco, Backspace, Tab, Esc, Shift, Ctrl,",
+              "Keyboard: letters, digits, F1-F24, Num0-Num9, Enter, Espaco (space), Backspace, Tab, Esc, Shift, Ctrl,")
+      << note("Alt, Cima, Baixo, Esquerda, Direita... Controle (Xbox): A, B, X, Y, LB, RB, LT, RT, Back, Start,",
+              "Alt, Cima (up), Baixo (down), Esquerda (left), Direita (right)... Controller (Xbox): A, B, X, Y, LB, RB,")
+      << note("LS, RS, Cima, Baixo, Esquerda, Direita. Vazio = nenhuma.", "LT, RT, Back, Start, LS, RS, Cima, Baixo, Esquerda, Direita. Empty = none.") << "\n";
+  out << "[disco]\n"
+      << note("A imagem do disco do jogo (SLES-53755); vazio = o primeiro .iso desta pasta ou de uma acima",
+              "The game's disc image (SLES-53755); empty = the first .iso in this folder or one above it")
+      << "iso=" << iso << "\n"
+      << note("Setup: compilar so quantos arquivos de cada vez a memoria livre comporta (0 = um por processador)",
+              "Setup: compile only as many files at once as the free memory holds (0 = one per processor)")
+      << "limitar_compilacoes=" << (limitBuildJobs ? 1 : 0) << "\n\n";
+  out << "[janela]\n"
+      << note("Ao abrir o jogo, pergunta ao GitHub se saiu uma versao nova do port (e avisa no titulo e no F1)",
+              "When the game opens, asks GitHub whether a new version of the port is out (and says so in the title and in F1)")
+      << "avisar_versao_nova=" << (checkUpdates ? 1 : 0) << "\ntela_cheia=" << (fullscreen ? 1 : 0) << "\n"
+      << note("Tamanho da janela fora da tela cheia, em pixels (em tela cheia vale o do monitor)",
+              "Size of the window out of full screen, in pixels (in full screen, the monitor's)")
+      << "tamanho_janela=" << windowWidth << 'x' << windowHeight << "\n"
+      << note("Onde a janela estava (canto superior esquerdo, em pixels da area de trabalho); vazio = no meio da tela",
+              "Where the window was (its top left corner, in desktop pixels); empty = in the middle of the screen")
+      << "posicao_janela=" << (windowX == kNoPlace ? std::string() : std::to_string(windowX) + "," + std::to_string(windowY)) << "\n"
+      << note("Proporcao: 4:3, 16:9 ou ultrawide (tao larga quanto a tela, 21:9 ou 32:9)",
+              "Proportion: 4:3, 16:9 or ultrawide (as wide as the screen, 21:9 or 32:9)")
+      << "proporcao=" << (!wide ? "4:3" : ultrawide ? "ultrawide" : "16:9") << "\n"
+      << note("Resolucao do desenho: 1 = a do PS2; 2 a 6 = tantas vezes mais nitida (pesa mais na placa de",
+              "Drawing resolution: 1 = the PS2's; 2 to 6 = that many times sharper (harder on the graphics card;")
+      << note("video; o 6x usa uns 1,5 GB de memoria de video nas cenas mais pesadas)", "6x takes about 1.5 GB of video memory in the heaviest scenes)")
+      << "resolucao=" << scale << "\n"
+      << note("Quadros por segundo no canto superior direito (F9 liga e desliga)", "Frames per second in the top right corner (F9 turns it on and off)")
+      << "mostrar_fps=" << (showFps ? 1 : 0) << "\n"
+      << note("Brilho da imagem em porcento (100 = como o jogo desenha; mais claro acima, mais escuro abaixo)",
+              "Brightness of the picture in percent (100 = as the game draws it; brighter above, darker below)")
+      << "brilho=" << brightness << "\n"
+      << note("Volume do som em porcento", "Sound volume in percent") << "volume=" << volume << "\n"
+      << note("Interpolacao: quadros feitos entre os do jogo, em telas de 100 Hz ou mais (atrasa a imagem um pouco)",
+              "Interpolation: frames made between the game's, on 100 Hz or faster screens (delays the picture a little)")
+      << "interpolacao=" << (interpolation ? 1 : 0) << "\n"
+      << note("Anti-aliasing FXAA: suaviza os serrilhados da imagem", "FXAA anti-aliasing: smooths the picture's jagged edges")
+      << "fxaa=" << (fxaa ? 1 : 0) << "\n"
+      << note("Nitidez em porcento (0 = desligada)", "Sharpening in percent (0 = off)") << "nitidez=" << sharpness << "\n"
+      << note("Filtro de TV de tubo (linhas e mascara)", "CRT TV filter (scanlines and mask)") << "filtro_crt=" << (crt ? 1 : 0) << "\n"
+      << note("Cores para daltonismo: 0 = nenhum, 1 = protanopia, 2 = deuteranopia, 3 = tritanopia",
+              "Colours for colour blindness: 0 = none, 1 = protanopia, 2 = deuteranopia, 3 = tritanopia")
+      << "daltonismo=" << colourBlind << "\n"
+      << note("Monitor com G-Sync ou FreeSync: cada imagem aparece assim que fica pronta (em outros monitores rasga)",
+              "G-Sync or FreeSync monitor: each picture shows as soon as it is ready (on other monitors it tears)")
+      << "taxa_variavel=" << (variableRefresh ? 1 : 0) << "\n"
+      << note("Baixa latencia: os controles sao lidos logo antes de cada quadro do jogo", "Low latency: the controls are read just before each of the game's frames")
+      << "baixa_latencia=" << (lowLatency ? 1 : 0) << "\n"
+      << note("Tamanho da HUD durante o jogo em porcento (80 a 125; cada parte cresce a partir do seu canto)",
+              "Size of the HUD during play in percent (80 to 125; each piece grows from its corner)")
+      << "tamanho_hud=" << hudScale << "\n"
+      << "# Idioma das opcoes e controles (F1): pt ou en / Language of the options and controls (F1): pt or en\nidioma=" << language
+      << "\n\n[jogo]\n"
+      << note("Com um inimigo travado, os ataques viram para ele", "With an enemy locked on, attacks turn to it")
+      << "ataque_no_alvo=" << (attackTurn ? 1 : 0) << "\n"
+      << note("O controle vibra quando o jogo faz o DualShock 2 vibrar", "The controller vibrates when the game makes the DualShock 2 vibrate")
+      << "vibracao=" << (vibration ? 1 : 0) << "\n"
+      << note("Icones de botao do Xbox (A, B, X, Y, LB...) no lugar dos do PS2 nos avisos do jogo",
+              "Xbox button icons (A, B, X, Y, LB...) in place of the PS2's in the game's prompts")
+      << "icones_xbox=" << (xboxIcons ? 1 : 0) << "\n"
+      << note("L3 (apertar o analogico esquerdo) liga e desliga a corrida mais rapida", "L3 (pressing the left stick) turns the faster run on and off")
+      << "corrida=" << (sprint ? 1 : 0) << "\n"
+      << note("Texturas suavizadas como no PS2; 0 = pixels duros", "Textures smoothed as on the PS2; 0 = hard pixels")
+      << "filtro_textura=" << (textureFilter ? 1 : 0) << "\n"
+      << note("Filtro anisotropico: 2, 4, 8 ou 16 (o chao e as paredes em angulo cintilam menos de longe); 0 = como o PS2",
+              "Anisotropic filter: 2, 4, 8 or 16 (floors and walls at an angle shimmer less far away); 0 = as the PS2")
+      << "filtro_anisotropico=" << anisotropy << "\n"
+      << note("Portas e telas de Loading sem esperar o tempo real; a musica e o som da porta somem",
+              "Doors and Loading screens without waiting the real time; the music and the door's sound go")
+      << "carregamento_rapido=" << (fastLoading ? 1 : 0) << "\n"
+      << note("Abertura sem esperar: a checagem do cartao de memoria e o logo da KONAMI passam na hora",
+              "Opening without waiting: the memory card check and the KONAMI logo go by at once")
+      << "abertura_rapida=" << (fastOpening ? 1 : 0) << "\n"
+      << note("Mapa no canto da tela (F8 liga e desliga)", "Map in the corner of the screen (F8 turns it on and off)") << "minimapa=" << (minimap ? 1 : 0) << "\n"
+      << note("Pacote de texturas: as imagens de textures\\replace no lugar das do jogo (vale ao abrir o jogo)",
+              "Texture pack: the pictures in textures\\replace in place of the game's (applies when the game opens)")
+      << "pacote_texturas=" << (texturePack ? 1 : 0) << "\n"
+      << note("Salva as texturas do jogo em textures\\dump, para fazer um pacote (vale ao abrir o jogo)",
+              "Saves the game's textures in textures\\dump, to make a pack (applies when the game opens)")
+      << "salvar_texturas=" << (dumpTextures ? 1 : 0) << "\n\n[mouse]\n"
+      << note("O mouse gira a camera (o analogico direito); Esc solta o cursor, um clique na janela prende de novo",
+              "The mouse turns the camera (the right stick); Esc lets the cursor go, a click in the window holds it again")
+      << "camera_com_mouse=" << (mouseCamera ? 1 : 0) << "\n"
+      << note("De 1 a 10", "From 1 to 10") << "sensibilidade=" << mouseSensitivity << "\n"
+      << note("1 = empurrar o mouse para a frente olha para baixo", "1 = pushing the mouse forward looks down") << "inverter_vertical=" << (invertMouseY ? 1 : 0) << "\n"
+      << note("1 = mover o mouse para a direita gira a camera para a esquerda", "1 = moving the mouse right turns the camera left")
+      << "inverter_horizontal=" << (invertMouseX ? 1 : 0) << "\n\n[controle_ajustes]\n"
+      << note("Zona morta dos analogicos em porcento (0 = a do XInput, 24 e 27)", "Dead zone of the sticks in percent (0 = XInput's, 24 and 27)")
+      << "zona_morta=" << stickDeadZone << "\n"
+      << note("Velocidade da camera no analogico direito, em porcento da do jogo (acima de 100, mais rapida que o jogo gira)",
+              "Camera speed on the right stick, in percent of the game's (above 100, faster than the game turns)")
+      << "velocidade_camera=" << stickCameraSpeed << "\ninverter_camera_horizontal=" << (invertStickX ? 1 : 0)
+      << "\ninverter_camera_vertical=" << (invertStickY ? 1 : 0) << "\n\n[som]\n"
+      << note("Saida de som pelo nome (vazio = a padrao do Windows)", "Sound output by name (empty = Windows' default)") << "dispositivo=" << audioDevice << "\n"
+      << note("Som 5.1: o Pro Logic II do jogo (escolha Pro Logic II nas opcoes de som dele) aberto em 6 canais",
+              "5.1 sound: the game's Pro Logic II (choose Pro Logic II in its sound options) opened into 6 channels")
+      << "surround_51=" << (surround ? 1 : 0) << "\n\n[extras]\n"
+      << note("Cronometro de speedrun no canto (F7): o tempo do jogo desde que ele comecou, sem os carregamentos",
+              "Speedrun timer in the corner (F7): the game's time since it started, without the loadings")
+      << "cronometro=" << (speedrunTimer ? 1 : 0) << "\n"
+      << note("O LiveSplit segue o cronometro (ligue o LiveSplit Server nele: Control > Start TCP Server, porta 16834)",
+              "LiveSplit follows the timer (turn its LiveSplit Server on: Control > Start TCP Server, port 16834)")
+      << "livesplit=" << (liveSplit ? 1 : 0) << "\n"
+      << note("Aviso na tela quando uma conquista do port e alcancada", "A notice on the screen when one of the port's achievements is reached")
+      << "avisos_conquistas=" << (achievementNotices ? 1 : 0) << "\n"
+      << note("Mostrar no Discord a area e o nivel do Hector", "Show Hector's area and level on Discord") << "discord=" << (discord ? 1 : 0) << "\n"
+      << note("Id do aplicativo do Discord (vazio = o do port)", "Discord application id (empty = the port's)")
+      << "discord_id_aplicativo=" << (discordClientId == kDiscordClientId ? "" : discordClientId) << "\n\n[teclado]\n";
   for (int c = 0; c < kControls; ++c) out << id(c) << '=' << keyName(keys[c]) << '\n';
   out << "\n[controle]\n";
   for (int c = 0; c < kButtons; ++c) out << id(c) << '=' << padName(pad[c]) << '\n';

@@ -42,8 +42,9 @@ void Hardware::updateTimer(int n) {
     t.last = cycles;
     return;
   }
-  const uint64_t per = cyclesPerTick(t);
-  uint64_t ticks = (cycles - t.last) / per;
+  const uint64_t per = cyclesPerTick(t), elapsed = cycles - t.last;
+  if (elapsed < per) return;  // no tick yet (most calls: the kernel polls every few dozen instructions; a division is slow on old processors)
+  uint64_t ticks = elapsed / per;
   t.last += ticks * per;
   while (ticks > 0) {
     const uint64_t toCmp = t.comp > t.count ? t.comp - t.count : 0x10000 - t.count + t.comp;

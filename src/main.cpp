@@ -40,6 +40,7 @@
 #include "game/speedrun.h"
 #include "host/discord.h"
 #include "host/hang_report.h"
+#include "host/overlay.h"
 #include "host/pcsx2_saves.h"
 #include "game/mouse_camera.h"
 #include "game/sprint.h"
@@ -52,15 +53,41 @@
 #include "iop/spu2.h"
 #include "iso9660.h"
 #include "recomp/generator.h"
+#include "recomp/gamecode.h"
 #include "recomp/runtime.h"
-
-void registerRecompiled(std::vector<rc::Entry>& out);  // src/recomp/gamecode.cpp
-bool newGameCode(std::vector<rc::Entry>& out);
-bool gameCodeIsOld();  // a part of the game's code was built by another version of the port
 
 namespace fs = std::filesystem;
 
 namespace {
+// What the title says while part of the game's code is missing: the interpreter runs it, several
+// times slower (VU1 ~4x), so a slow processor may not reach 60 frames a second until Setup is done.
+std::wstring gameCodeNotice(const GameCodeStatus& s) {
+  if (s.loaded == s.parts) return {};
+  if (s.failed)
+    return english() ? L"  |  Building the game's code failed (it runs slower): run Setup and choose Build the game"
+                     : L"  |  A geração do código do jogo falhou (ele roda mais lento): rode o Setup e escolha Gerar o jogo";
+  if (s.building)
+    return english() ? std::format(L"  |  Building the rest of the game's code ({} of {} parts in use): slower until it is done", s.loaded, s.parts)
+                     : std::format(L"  |  Gerando o resto do código do jogo ({} de {} partes em uso): mais lento até terminar", s.loaded, s.parts);
+  return english() ? L"  |  The game's code is incomplete (it runs slower): run Setup and choose Build the game"
+                   : L"  |  O código do jogo está incompleto (ele roda mais lento): rode o Setup e escolha Gerar o jogo";
+}
+
+// The same in the title and, small, over the picture at the top right (seen in full screen too),
+// with a bar while the rest is built.
+void showGameCodeStatus(const GameCodeStatus& s) {
+  setTitleNotice(gameCodeNotice(s));
+  if (s.loaded == s.parts) return setOverlayText(OverlaySlot::Build, L"");
+  const bool en = english();
+  if (s.failed) return setOverlayText(OverlaySlot::Build, en ? L"Building the game's code failed: run Setup" : L"A geração do código do jogo falhou: rode o Setup");
+  if (!s.building) return setOverlayText(OverlaySlot::Build, en ? L"The game's code is incomplete: run Setup" : L"Código do jogo incompleto: rode o Setup");
+  const float progress = s.progress >= 0 ? s.progress : float(s.loaded - 1) / float(s.parts - 1);
+  const int percent = int(progress * 100);
+  setOverlayText(OverlaySlot::Build, en ? std::format(L"Building the game's code: {}% (slower until it is done)", percent)
+                                        : std::format(L"Compilando o código do jogo: {}% (mais lento até terminar)", percent),
+                 1, progress);
+}
+
 // AVX2, with the operating system saving the YMM registers (CPUID leaf 7 EBX bit 5; OSXSAVE and
 // XCR0 bits 1-2).
 bool cpuHasAvx2() {
@@ -381,6 +408,15 @@ int main(int argc, char** argv) {
                               : L"O código do jogo foi feito por uma versão anterior do port. Rode o Setup.exe e escolha Gerar o jogo.\n\n"
                                 L"Até lá o jogo roda sem ele, bem devagar.");
     }
+    if (!headless) {  // part of it missing: the title says so until it is all in use (and why it is slower)
+      const GameCodeStatus status = gameCodeStatus();
+      showGameCodeStatus(status);
+      if (status.loaded < status.parts && !status.building && !gameCodeIsOld())
+        showWarning(english() ? L"Part of the game's code is missing (building it failed or was stopped). Run Setup.exe and choose Build the game.\n\n"
+                                L"Until then the game runs without that part, slower."
+                              : L"Falta parte do código do jogo (a geração falhou ou foi interrompida). Rode o Setup.exe e escolha Gerar o jogo.\n\n"
+                                L"Até lá o jogo roda sem essa parte, mais lento.");
+    }
     // The table covers all of the program now, so that parts of the code loaded later (while the
     // CPU runs) only fill slots in it.
     for (const auto& seg : elf.segments)
@@ -622,6 +658,7 @@ int main(int argc, char** argv) {
         }
         std::printf("frame %llu: %zu more recompiled entry points\n", (unsigned long long)n, added);
       }
+      if (!headless) showGameCodeStatus(gameCodeStatus());
     }
     if (callsFrom && n == callsFrom) {  // only count what runs from here on
       cpu.calls.clear();

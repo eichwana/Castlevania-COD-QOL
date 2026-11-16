@@ -38,25 +38,46 @@ function Test-Iso($path) {
   } catch { return $false }
 }
 
-# Writes the image's path into codport.ini ([disco] iso=...), keeping everything else.
-function Save-Iso($path) {
+# Writes a setting of codport.ini's [disco] section (the image's path, iso=...; the compile limit),
+# keeping everything else.
+function Save-Setting($key, $value) {
   $utf8 = New-Object Text.UTF8Encoding $false
+  $line = "$key=$value"
   if (Test-Path $ini) {
     $lines = [Collections.Generic.List[string]]([IO.File]::ReadAllLines($ini, $utf8))
     $at = -1
-    for ($i = 0; $i -lt $lines.Count; $i++) { if ($lines[$i] -match '^\s*iso\s*=') { $at = $i } }
-    if ($at -ge 0) { $lines[$at] = "iso=$path" }
-    else { $lines.InsertRange(0, [string[]]@('[disco]', "iso=$path", '')) }
+    $section = -1
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+      if ($lines[$i] -match ('^\s*' + [regex]::Escape($key) + '\s*=')) { $at = $i }
+      if ($lines[$i].Trim() -eq '[disco]') { $section = $i }
+    }
+    if ($at -ge 0) { $lines[$at] = $line }
+    elseif ($section -ge 0) { $lines.Insert($section + 1, $line) }
+    else { $lines.InsertRange(0, [string[]]@('[disco]', $line, '')) }
     [IO.File]::WriteAllLines($ini, $lines, $utf8)
   } else {
-    [IO.File]::WriteAllText($ini, "[disco]`r`niso=$path`r`n", $utf8)
+    [IO.File]::WriteAllText($ini, "[disco]`r`n$line`r`n", $utf8)
   }
 }
+function Save-Iso($path) { Save-Setting 'iso' $path }
 
-function Saved-Iso {
+function Saved-Setting($key) {
   if (-not (Test-Path $ini)) { return '' }
-  foreach ($line in [IO.File]::ReadAllLines($ini, [Text.Encoding]::UTF8)) { if ($line -match '^\s*iso\s*=\s*(.+)$') { return $Matches[1].Trim() } }
+  foreach ($line in [IO.File]::ReadAllLines($ini, [Text.Encoding]::UTF8)) {
+    if ($line -match ('^\s*' + [regex]::Escape($key) + '\s*=\s*(.+)$')) { return $Matches[1].Trim() }
+  }
   return ''
+}
+function Saved-Iso { Saved-Setting 'iso' }
+
+# How many files to compile at once: with the limiter on (the default), no more than the free memory
+# holds at 1 GB each (a translated file takes up to ~550 MB to compile, the VU ones; measured), and
+# no more than the logical processors; with it off, 0: Ninja's own count (processors plus two).
+function Build-Jobs {
+  if ($noLimit.Checked) { return 0 }
+  $n = [Environment]::ProcessorCount
+  try { $freeKb = (Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory } catch { return $n }
+  return [int][Math]::Max(1, [Math]::Min($n, [Math]::Floor($freeKb / 1MB)))
 }
 
 function Ready { (Test-Path $exe) -and (Test-Path (Join-Path $root 'build\codport_game.dll')) }
@@ -117,8 +138,15 @@ $output.Multiline = $true
 $output.ScrollBars = 'Vertical'
 $output.ReadOnly = $true
 $output.Font = New-Object Drawing.Font('Consolas', 8)
-$output.SetBounds(16, 298, 608, 206)
+$output.SetBounds(16, 324, 608, 206)
 $form.Controls.Add($output)
+# Right under the build's progress, where it is seen: turns off the limit on files compiled at once.
+$noLimit = New-Object Windows.Forms.CheckBox
+$noLimit.Text = T 'Turn off the compile limiter (one file per processor, even with little free memory)' 'Desativar limitador de compilações (um arquivo por processador, mesmo com pouca memória livre)'
+$noLimit.SetBounds(16, 294, 608, 24)
+$noLimit.Checked = (Saved-Setting 'limitar_compilacoes') -eq '0'
+$noLimit.Add_CheckedChanged({ Save-Setting 'limitar_compilacoes' $(if ($noLimit.Checked) { '0' } else { '1' }) })
+$form.Controls.Add($noLimit)
 
 function Refresh-State {
   $tools = Find-Tools
@@ -139,6 +167,10 @@ function Refresh-State {
   $prepare.Enabled = [bool]($tools -and $isoOk -and -not $script:job -and -not $script:rest)
   $play.Enabled = [bool]((Ready) -and $isoOk -and -not $script:job)
   if ((AllReady) -and -not $script:job -and -not $script:rest -and -not $progress.Text) { $progress.Text = T 'Ready to play.' 'Pronto para jogar.' }
+  # The limiter's box only until the game is all built (it goes with the build's messages); the log
+  # takes its place.
+  $noLimit.Visible = [bool](-not (AllReady) -or $script:job -or $script:rest)
+  if ($noLimit.Visible) { $output.SetBounds(16, 324, 608, 206) } else { $output.SetBounds(16, 298, 608, 232) }
 }
 
 $installTools.Add_Click({
@@ -175,6 +207,8 @@ function Start-Phase($phase, $logFile) {
   $bat = Join-Path $root 'tools\setup\build-game.bat'
   Set-Content $run "@echo off`r`ncall `"$bat`" $phase > `"$logFile`" 2>&1`r`nexit /b %errorlevel%`r`n" -Encoding Default
   $script:started = Get-Date
+  $jobs = Build-Jobs
+  $env:CODPORT_JOBS = $(if ($jobs -gt 0) { "$jobs" } else { $null })
   $p = Start-Process $run -WindowStyle Hidden -PassThru
   $p.Handle | Out-Null  # held, or its exit code is lost once it ends
   if ($phase -eq 'rest') { try { $p.PriorityClass = 'BelowNormal' } catch {} }

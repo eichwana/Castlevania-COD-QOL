@@ -29,6 +29,8 @@ namespace {
 bool gHeld[256] = {};
 WINDOWPLACEMENT gWindowed = {sizeof(WINDOWPLACEMENT)};
 std::wstring gTitle;
+std::mutex gNoticeMutex;
+std::wstring gTitleNotice;  // setTitleNotice
 HWND gGameWindow = nullptr;
 std::atomic<int> gClientW{16}, gClientH{9};  // the game window's inside (WM_SIZE)
 std::mutex gPhotoMutex;
@@ -51,6 +53,10 @@ void updateTitle(HWND hwnd) {
   std::wstring notice;
   if (const std::string v = newerVersion(); !v.empty())
     notice = (english() ? L"  |  New version " : L"  |  Nova versão ") + std::wstring(v.begin(), v.end()) + (english() ? L" out (F1)" : L" disponível (F1)");
+  {
+    std::lock_guard lock(gNoticeMutex);
+    notice += gTitleNotice;
+  }
   SetWindowTextW(hwnd, (gTitle + notice + L"  |  " + mode +
                         (english() ? L"  |  Alt+Enter: full screen  |  F10: 4:3 / 16:9  |  F9: FPS  |  F1: options and controls"
                                    : L"  |  Alt+Enter: tela cheia  |  F10: 4:3 / 16:9  |  F9: FPS  |  F1: opções e controles"))
@@ -405,6 +411,15 @@ void setWindowSize(void* window, int width, int height) {
 
 void refreshTitle() {
   if (HWND hwnd = gGameWindow) PostMessageW(hwnd, kRefreshTitle, 0, 0);
+}
+
+void setTitleNotice(const std::wstring& text) {
+  {
+    std::lock_guard lock(gNoticeMutex);
+    if (gTitleNotice == text) return;
+    gTitleNotice = text;
+  }
+  refreshTitle();
 }
 
 void setWide(void* window, bool on) {

@@ -83,7 +83,7 @@ std::string now() {
 void save() {
   if (gFile.empty()) return;
   std::ofstream out(gFile, std::ios::trunc);
-  out << "# Conquistas do port (achievements): id=quando\n";
+  out << "# Conquistas do port: id=quando / The port's achievements: id=when\n";
   for (const auto& [id, when] : gUnlocked) out << id << '=' << when << '\n';
 }
 }  // namespace

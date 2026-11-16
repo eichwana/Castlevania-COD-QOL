@@ -26,6 +26,7 @@ struct Settings {
   std::array<uint16_t, kButtons> pad{};
 
   std::string iso;  // the game's disc image, UTF-8 (set by the setup, or when the game asks for it)
+  bool limitBuildJobs = true;  // Setup compiles only as many files at once as the free memory holds (its own; kept here)
   bool fullscreen = false;
   int windowWidth = 960, windowHeight = 720;  // the window's inside, out of full screen
   // Where the window was last left (its outer top left corner, on any screen); kNoPlace: centred.

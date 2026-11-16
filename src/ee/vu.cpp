@@ -394,9 +394,12 @@ void VuMicro::execute(uint32_t startAddr) {
       BlockCache& b = blocks_[pc / 8];
       if (b.generation != generation_) {
         b.generation = generation_;
-        if (!b.fn || std::memcmp(code_ + pc, b.code.data(), b.code.size()) != 0) {
+        // Looked up again only if the words or the compiled blocks changed: VU0's code is checked
+        // again at every VCALLMS, and the blocks with nothing compiled were looked up each time.
+        if (b.registry != seenRegistry_ || std::memcmp(code_ + pc, b.code.data(), b.code.size()) != 0) {
           b.fn = findBlock(pc);
-          if (b.fn) b.code.assign(code_ + pc, code_ + pc + size_t(blockLength(pc)) * 8);
+          b.registry = seenRegistry_;
+          b.code.assign(code_ + pc, code_ + pc + size_t(blockLength(pc)) * 8);
         }
       }
       if (b.fn) {

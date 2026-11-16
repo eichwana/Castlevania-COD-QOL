@@ -83,6 +83,9 @@ bool takePhotoToggle();       // F6 was pressed since the last call
 void setPhotoMode(bool on);  // on: starts at the whole picture; off: back to the game
 // The window's title written again (from any thread): it also says when a newer version is out.
 void refreshTitle();
+// A notice the title carries (from any thread; empty: none), such as that the game's code is still
+// being built; the title is written again.
+void setTitleNotice(const std::wstring& text);
 // Where "possible" comes from: the working seconds so far of each part that takes its turn every
 // frame (threads' CPU time, the graphics card's time), the busiest of which sets the pace.
 void setWorkClocks(std::function<std::vector<double>()> clocks);

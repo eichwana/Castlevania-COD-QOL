@@ -197,17 +197,22 @@ def ini_path():
     return os.path.join(ROOT, 'codport.ini')
 
 
-def saved_iso():
+def saved(name):
+    """A setting of codport.ini, '' if it is not there."""
     try:
         with open(ini_path(), encoding='utf-8-sig') as f:
             for line in f:
                 key, _, value = line.partition('=')
-                if key.strip() == 'iso' and value.strip():
-                    v = value.strip()
-                    return v[2:].replace('\\', '/') if v[:2].upper() == 'Z:' and not WINDOWS else v
+                if key.strip() == name and value.strip():
+                    return value.strip()
     except OSError:
         pass
     return ''
+
+
+def saved_iso():
+    v = saved('iso')
+    return v[2:].replace('\\', '/') if v[:2].upper() == 'Z:' and not WINDOWS else v
 
 
 def save_iso(path):
@@ -259,6 +264,8 @@ PARTS = [  # as CMakeLists.txt: the DLL, the folder of its sources; then build-g
 
 def jobs():
     n = os.cpu_count() or 4
+    if saved('limitar_compilacoes') == '0':  # the limit turned off (Setup's option, in codport.ini)
+        return n
     try:  # a translated file can take a couple of GB to compile: no more at once than memory holds
         with open('/proc/meminfo') as f:
             kb = next(int(l.split()[1]) for l in f if l.startswith('MemAvailable'))
@@ -279,6 +286,12 @@ def system_flags():
     includes = ['crt/include', 'sdk/include/ucrt', 'sdk/include/um', 'sdk/include/shared']
     libs = ['crt/lib/x86_64', 'sdk/lib/um/x86_64', 'sdk/lib/ucrt/x86_64']
     return ['/imsvc' + os.path.join(s, p) for p in includes], ['/libpath:' + os.path.join(s, p) for p in libs]
+
+
+def progress(line):
+    """Into build/setup-rest.log, where a running game reads how far the build is ("part X", "[n/m]")."""
+    with open(os.path.join(BUILD, 'setup-rest.log'), 'a') as f:
+        f.write(line + '\n')
 
 
 def compile_part(name, folder):
@@ -319,6 +332,7 @@ def compile_part(name, folder):
                 fail(f'{obj} did not compile', f'{obj} nao compilou')
             objects.append(obj)
             print(f'  {name}: {done}/{len(sources)} ({int(time.time() - start)} s)', flush=True)
+            progress(f'[{done}/{len(sources)}]')
     objects.append(os.path.join(objdir, 'pch.obj'))
     response = os.path.join(objdir, 'link.rsp')
     with open(response, 'w') as f:
@@ -374,15 +388,34 @@ def main():
             f.write(stamp)
 
     say(f'compiling, {jobs()} at a time (the slow part)', f'compilando, {jobs()} de cada vez (a parte demorada)')
-    for i, (name, folder) in enumerate(PARTS):
-        if i > 0 and os.path.exists(os.path.join(BUILD, name + '.ready')):
-            continue
-        compile_part(name, folder)
-        if i > 0:
-            open(os.path.join(BUILD, name + '.ready'), 'w').close()
-        if i == 0:
-            say('the game can already be played; the rest goes on (it makes it faster)',
-                'o jogo ja pode ser jogado; o resto continua (deixa ele mais rapido)')
+    # While the parts after the first are built, codport_game.building tells a running game (its title
+    # says it is slower until then); if one fails, codport_game.failed tells it to run the setup again.
+    building, failed = os.path.join(BUILD, 'codport_game.building'), os.path.join(BUILD, 'codport_game.failed')
+    for marker in (building, failed):
+        if os.path.exists(marker):
+            os.remove(marker)
+    try:
+        for i, (name, folder) in enumerate(PARTS):
+            if i > 0 and os.path.exists(os.path.join(BUILD, name + '.ready')):
+                continue
+            if i > 0 and not os.path.exists(building):
+                open(building, 'w').close()
+                open(os.path.join(BUILD, 'setup-rest.log'), 'w').close()
+            if i > 0:
+                progress('part ' + name)
+            compile_part(name, folder)
+            if i > 0:
+                open(os.path.join(BUILD, name + '.ready'), 'w').close()
+            if i == 0:
+                say('the game can already be played; the rest goes on (it makes it faster)',
+                    'o jogo ja pode ser jogado; o resto continua (deixa ele mais rapido)')
+    except SystemExit:
+        if os.path.exists(building):
+            open(failed, 'w').close()
+        raise
+    finally:
+        if os.path.exists(building):
+            os.remove(building)
     say('done. In Steam: Add a Non-Steam Game -> build/codport.exe; Properties -> Compatibility -> force Proton.',
         'pronto. Na Steam: Adicionar jogo nao-Steam -> build/codport.exe; Propriedades -> Compatibilidade -> forcar o Proton.')
 
