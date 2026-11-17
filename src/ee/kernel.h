@@ -26,6 +26,15 @@ public:
 
   std::string describeThreads() const;
   std::vector<std::string> recentCalls() const;  // last syscalls, oldest first
+  // Whether a semaphore could be taken now without waiting (native code that shares data with
+  // guest threads guarded by it: src/game/native_movie.cpp).
+  bool semaphoreFree(int id) const;
+  // Threads that only hand the processor to each other (RotateThreadReadyQueue) many times with no
+  // interrupt in between are waiting for one: emulated time then moves on to the next event, as for
+  // an idle loop. Only while set (the native movie player, src/game/native_movie.cpp: its two
+  // threads yield to each other while they wait for the disc or the VBlank), so that everything
+  // else runs as before.
+  bool yieldsSkipIdle = false;
   struct Handler {
     uint32_t cause, func, arg, id;
   };
@@ -61,6 +70,7 @@ private:
   };
   std::array<Note, 48> recent_{};  // a ring: every syscall notes itself, and the game makes many
   uint64_t noted_ = 0;
+  int yieldsWithoutInterrupt_ = 0;
   void ret(uint32_t v);
   uint32_t arg(int reg) const;
   bool validThread(int id) const;

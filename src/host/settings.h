@@ -54,6 +54,7 @@ struct Settings {
   int sharpness = 0, colourBlind = 0;
   bool fastLoading = true;  // between places, no waiting for real time (nor its sound)
   bool fastOpening = true;  // the memory card check and the KONAMI logo at boot, without waiting
+  bool nativeMovies = false;  // movies decoded natively instead of through libmpeg and the IPU (old processors; from the next movie)
   bool sprint = true;  // L3 sprints (read at start)
   bool attackTurn = true;  // with an enemy locked on, attacks turn to it (read at start)
   bool xboxIcons = true;  // the game's PS2 button icons drawn as an Xbox controller's (A, B, X, Y, LB...)

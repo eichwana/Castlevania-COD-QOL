@@ -44,7 +44,8 @@ void Hardware::updateTimer(int n) {
   }
   const uint64_t per = cyclesPerTick(t), elapsed = cycles - t.last;
   if (elapsed < per) return;  // no tick yet (most calls: the kernel polls every few dozen instructions; a division is slow on old processors)
-  uint64_t ticks = elapsed / per;
+  // The bus clock rates are powers of two: a shift (movies run the fastest timer, ticking every poll).
+  uint64_t ticks = (t.mode & 3) == 3 ? elapsed / per : elapsed >> ((t.mode & 3) == 0 ? 1 : (t.mode & 3) == 1 ? 5 : 9);
   t.last += ticks * per;
   while (ticks > 0) {
     const uint64_t toCmp = t.comp > t.count ? t.comp - t.count : 0x10000 - t.count + t.comp;

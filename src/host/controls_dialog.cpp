@@ -32,7 +32,7 @@ enum : int { kList = 100, kClear, kDefaults, kClose, kHint, kTabs, kDownload };
 
 // The options page: a check box per setting, the resolution in a list.
 enum : int { kFullscreen = 200, kWide, kFilter, kFps, kMinimap, kFastLoading, kSprint, kAttackTurn, kMouseCamera, kInvertY, kInvertX,
-             kScale, kScaleLabel, kOptionsNote, kWindowSize, kSensitivity, kLanguage, kInterpolation, kUpdateCheck, kVibration, kBrightness, kVolume, kFastOpening, kXboxIcons, kDeadZone, kStickSpeed, kInvertStickX, kInvertStickY };
+             kScale, kScaleLabel, kOptionsNote, kWindowSize, kSensitivity, kLanguage, kInterpolation, kUpdateCheck, kVibration, kBrightness, kVolume, kFastOpening, kXboxIcons, kDeadZone, kNativeMovies, kStickSpeed, kInvertStickX, kInvertStickY };
 // The extras page.
 enum : int { kSpeedrunTimer = 300, kLiveSplit, kAchievementNotices, kDiscord, kShowAchievements, kImportCard, kImportFolder, kExportFolder };
 // The picture and sound page.
@@ -46,6 +46,7 @@ bool* optionOf(int id) {
     case kUpdateCheck: return &s.checkUpdates;
     case kVibration: return &s.vibration;
     case kFastOpening: return &s.fastOpening;
+    case kNativeMovies: return &s.nativeMovies;
     case kXboxIcons: return &s.xboxIcons;
     case kInvertStickX: return &s.invertStickX;
     case kInvertStickY: return &s.invertStickY;
@@ -242,6 +243,8 @@ void createOptions() {
                       {kFastLoading, T(L"Carregamento rápido nas portas (a música para durante ele)", L"Fast loading at doors (the music stops during it)"), s.fastLoading},
                       {kFastOpening, T(L"Abertura rápida (a checagem do cartão e o logo da KONAMI passam na hora)",
                                        L"Fast opening (the memory card check and the KONAMI logo go by at once)"), s.fastOpening},
+                      {kNativeMovies, T(L"Vídeos decodificados direto no PC: para processadores antigos (vale a partir do próximo vídeo)",
+                                        L"Movies decoded straight on the PC: for old processors (applies from the next movie)"), s.nativeMovies},
                       {kSprint, T(L"Correr mais rápido com L3", L"Run faster with L3"), s.sprint},
                       {kAttackTurn, T(L"Ataques viram para o inimigo travado", L"Attacks turn to the locked-on enemy"), s.attackTurn},
                       {kVibration, T(L"Vibração do controle (quando o jogo faz o DualShock 2 vibrar)", L"Controller vibration (when the game makes the DualShock 2 vibrate)"),

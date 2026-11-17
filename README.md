@@ -30,6 +30,7 @@ The port is made with the help of AI (Anthropic's Claude). Every change is teste
 - **Attacks turn to the target** - with an enemy locked on, attacks turn toward it.
 - **Fast loading** - doors and Loading screens no longer wait for real time. The music pauses during them.
 - **Fast opening** - at boot, the memory card check and the KONAMI logo, which no button skips, go by at once.
+- **Movies decoded on the PC** (off by default; **F1** > Options) - for old processors, where the movies run below 60 FPS: their MPEG-2 pictures are decoded natively instead of through the emulated IPU, and the movie player's threads stop spinning while they wait, about 4x less work for the processor during movies. Same pictures (without the broken blocks the emulation shows in a few), sound in sync, the game the same afterwards. Applies from the next movie.
 - **Settings menu** - **F1** opens a window with every action of the game to remap to a key or controller button, and all of the options above, each of which can be turned off. It is in English or Portuguese, chosen in the window itself (by default, the language of Windows).
 - **Any screen size** - full screen at the monitor's own resolution, or a window sized for 1080p, 1440p, 4K or ultrawide screens, the picture kept in proportion with black bars.
 - **Keyboard and Xbox controller** - XInput controllers work out of the box, and an optional frame counter shows performance (**F9**).
@@ -254,6 +255,7 @@ O port é feito com a ajuda de IA (o Claude, da Anthropic). Cada alteração é 
 - **Ataques no alvo** - com um inimigo travado, os ataques viram na direção dele.
 - **Carregamento rápido** - portas e telas de Loading não esperam mais o tempo real. A música pausa durante eles.
 - **Abertura rápida** - ao abrir o jogo, a checagem do cartão de memória e o logo da KONAMI, que nenhum botão pula, passam na hora.
+- **Vídeos decodificados no PC** (desligado por padrão; **F1** > Opções) - para processadores antigos, em que os vídeos rodam abaixo de 60 FPS: as imagens MPEG-2 são decodificadas nativamente em vez de pelo IPU emulado, e as threads do player de vídeo param de girar enquanto esperam, cerca de 4x menos trabalho para o processador durante os vídeos. As mesmas imagens (sem os blocos quebrados que a emulação mostra em alguns), som sincronizado, o jogo igual depois. Vale a partir do próximo vídeo.
 - **Menu de configurações** - o **F1** abre uma janela com todas as ações do jogo para trocar a tecla ou o botão do controle, e todas as opções acima, cada uma podendo ser desligada. Ela fica em português ou inglês, escolhido na própria janela (por padrão, o idioma do Windows).
 - **Qualquer tamanho de tela** - tela cheia na resolução do próprio monitor, ou janela em tamanhos para telas 1080p, 1440p, 4K ou ultrawide, com a imagem mantida na proporção por barras pretas.
 - **Teclado e controle Xbox** - controles XInput funcionam direto, e um contador de quadros opcional mostra o desempenho (**F9**).

@@ -44,6 +44,7 @@
 #include "host/pcsx2_saves.h"
 #include "game/mouse_camera.h"
 #include "game/sprint.h"
+#include "game/native_movie.h"
 #include "game/widescreen.h"
 #include "host/sampler.h"
 #include "host/window.h"
@@ -216,6 +217,7 @@ int main(int argc, char** argv) {
   fs::path replayFile;  // a recorded session to play back (build/recordings/*.txt)
   int scaleOption = 0;  // --scale: over the setting, for this run
   bool attackTurnOption = false, sprintOption = false, filterOption = false;
+  if (argc >= 3 && std::string(argv[1]) == "--mpeg2-test") return mpeg2TestFile(argv[2], argc >= 4 ? argv[3] : "", argc >= 5 ? std::atoi(argv[4]) : 0);
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
     if (a == "--max" && i + 1 < argc) {
@@ -428,6 +430,7 @@ int main(int argc, char** argv) {
     }
     if (!entries.empty()) std::printf("recompiled code: %zu entry points\n", entries.size());
     installWidescreen(cpu);
+    installNativeMovie(cpu);
     installAttackTurn(cpu);
     installSprint(cpu);
     installMouseCamera(cpu);

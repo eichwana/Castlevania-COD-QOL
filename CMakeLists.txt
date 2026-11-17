@@ -32,6 +32,7 @@ set(SOURCES
   src/gs/texture_pack.cpp
   src/gs/vif.cpp
   src/ipu/ipu.cpp
+  src/ipu/mpeg2_decoder.cpp
   src/host/window.cpp
   src/recomp/generator.cpp
   src/iop/sif.cpp
@@ -66,6 +67,7 @@ set(SOURCES
   src/game/mouse_camera.cpp
   src/game/sprint.cpp
   src/game/widescreen.cpp
+  src/game/native_movie.cpp
   src/recomp/vu_generator.cpp
 )
 option(CODPORT_GAME_ONLY "Build only codport_game.dll, next to a codport.exe and codport.lib already built" OFF)

@@ -217,6 +217,7 @@ void Settings::load(const std::filesystem::path& from) {
       if (key == "filtro_anisotropico") anisotropy = std::clamp(std::atoi(value.c_str()), 0, 16);
       if (key == "carregamento_rapido") fastLoading = value == "1";
       if (key == "abertura_rapida") fastOpening = value == "1";
+      if (key == "videos_nativos") nativeMovies = value == "1";
       if (key == "minimapa") minimap = value == "1";
       if (key == "pacote_texturas") texturePack = value == "1";
       if (key == "salvar_texturas") dumpTextures = value == "1";
@@ -340,6 +341,9 @@ void Settings::save() const {
       << note("Abertura sem esperar: a checagem do cartao de memoria e o logo da KONAMI passam na hora",
               "Opening without waiting: the memory card check and the KONAMI logo go by at once")
       << "abertura_rapida=" << (fastOpening ? 1 : 0) << "\n"
+      << note("Videos decodificados direto no PC em vez de pelo IPU emulado: bem mais leves para processadores antigos (vale a partir do proximo video)",
+              "Movies decoded straight on the PC instead of through the emulated IPU: far lighter on old processors (applies from the next movie)")
+      << "videos_nativos=" << (nativeMovies ? 1 : 0) << "\n"
       << note("Mapa no canto da tela (F8 liga e desliga)", "Map in the corner of the screen (F8 turns it on and off)") << "minimapa=" << (minimap ? 1 : 0) << "\n"
       << note("Pacote de texturas: as imagens de textures\\replace no lugar das do jogo (vale ao abrir o jogo)",
               "Texture pack: the pictures in textures\\replace in place of the game's (applies when the game opens)")

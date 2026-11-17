@@ -1,4 +1,5 @@
 #include "ipu/ipu.h"
+#include "ipu/mpeg2.h"
 
 #include <algorithm>
 #include <array>
@@ -10,20 +11,9 @@
 
 // ---- MPEG-2 variable-length code tables (ISO/IEC 13818-2 annex B) -------------------------------
 
-struct VlcEntry {
-  int16_t value = 0;  // decoded value; for DCT tables the run (kEob / kEscape for those codes)
-  int8_t level = 0;   // DCT tables: the level
-  uint8_t len = 0;    // code length in bits, 0 for an invalid code
-};
-struct VlcTable {
-  VlcEntry e[1 << 16];
-};
-
-namespace {
+namespace mpeg2 {
 // std::lround for the small values here, without the library call.
 inline int roundHalfAway(double x) { return x >= 0 ? int(x + 0.5) : -int(0.5 - x); }
-
-constexpr int kEob = -1, kEscape = -2;
 
 struct Code {
   const char* bits;  // spaces are ignored
@@ -73,9 +63,7 @@ VlcTable* build(std::initializer_list<Code> codes) {
   {"0000 0000 0001 1110", 28, 1}, {"0000 0000 0001 1101", 29, 1}, {"0000 0000 0001 1100", 30, 1},   \
   {"0000 0000 0001 1011", 31, 1}
 
-struct Tables {
-  VlcTable *mbai, *mbType[4], *cbp, *motion, *dmv, *dcLuma, *dcChroma, *dct0, *dct1;
-  Tables() {
+Tables::Tables() {
     mbai = build({{"1", 1, 0}, {"011", 2, 0}, {"010", 3, 0}, {"0011", 4, 0}, {"0010", 5, 0},
                   {"0001 1", 6, 0}, {"0001 0", 7, 0}, {"0000 111", 8, 0}, {"0000 110", 9, 0},
                   {"0000 1011", 10, 0}, {"0000 1010", 11, 0}, {"0000 1001", 12, 0}, {"0000 1000", 13, 0},
@@ -152,8 +140,7 @@ struct Tables {
                   {"0010 0010", 0, 11}, {"0010 0000", 1, 5}, {"0000 0011 00", 2, 4},
                   {"1111 1010", 0, 12}, {"1111 1011", 0, 13}, {"1111 1110", 0, 14}, {"1111 1111", 0, 15},
                   DCT_COMMON});
-  }
-};
+}
 #undef DCT_COMMON
 
 const Tables& tables() {
@@ -161,19 +148,19 @@ const Tables& tables() {
   return t;
 }
 
-constexpr uint8_t kZigzag[64] = {0,  1,  8,  16, 9,  2,  3,  10, 17, 24, 32, 25, 18, 11, 4,  5,
+const uint8_t kZigzag[64] = {0,  1,  8,  16, 9,  2,  3,  10, 17, 24, 32, 25, 18, 11, 4,  5,
                                  12, 19, 26, 33, 40, 48, 41, 34, 27, 20, 13, 6,  7,  14, 21, 28,
                                  35, 42, 49, 56, 57, 50, 43, 36, 29, 22, 15, 23, 30, 37, 44, 51,
                                  58, 59, 52, 45, 38, 31, 39, 46, 53, 60, 61, 54, 47, 55, 62, 63};
-constexpr uint8_t kAlternate[64] = {0,  8,  16, 24, 1,  9,  2,  10, 17, 25, 32, 40, 48, 56, 57, 49,
+const uint8_t kAlternate[64] = {0,  8,  16, 24, 1,  9,  2,  10, 17, 25, 32, 40, 48, 56, 57, 49,
                                     41, 33, 26, 18, 3,  11, 4,  12, 19, 27, 34, 42, 50, 58, 35, 43,
                                     51, 59, 20, 28, 5,  13, 6,  14, 21, 29, 36, 44, 52, 60, 37, 45,
                                     53, 61, 22, 30, 7,  15, 23, 31, 38, 46, 54, 62, 39, 47, 55, 63};
-constexpr uint8_t kDefaultIntra[64] = {8,  16, 19, 22, 26, 27, 29, 34, 16, 16, 22, 24, 27, 29, 34, 37,
+const uint8_t kDefaultIntra[64] = {8,  16, 19, 22, 26, 27, 29, 34, 16, 16, 22, 24, 27, 29, 34, 37,
                                        19, 22, 26, 27, 29, 34, 34, 38, 22, 22, 26, 27, 29, 34, 37, 40,
                                        22, 26, 27, 29, 32, 35, 40, 48, 26, 27, 29, 32, 35, 40, 48, 58,
                                        26, 27, 29, 34, 38, 46, 56, 69, 27, 29, 35, 38, 46, 56, 69, 83};
-constexpr uint8_t kNonLinearQ[32] = {0,  1,  2,  3,  4,  5,  6,  7,  8,  10, 12, 14, 16, 18,  20,  22,
+const uint8_t kNonLinearQ[32] = {0,  1,  2,  3,  4,  5,  6,  7,  8,  10, 12, 14, 16, 18,  20,  22,
                                      24, 28, 32, 36, 40, 44, 48, 52, 56, 64, 72, 80, 88, 96, 104, 112};
 
 // 8x8 inverse DCT (separable, double precision: well inside the IEEE 1180 accuracy limits).
@@ -199,6 +186,28 @@ void idct(const int16_t* in, int16_t* out) {
       out[y * 8 + x] = int16_t(std::clamp(roundHalfAway(s), -256, 255));
     }
 }
+
+void cscMacroblock(const uint8_t* src, uint32_t* px, uint32_t th0, uint32_t th1) {
+  for (int y = 0; y < 16; ++y)
+    for (int x = 0; x < 16; ++x) {
+      const double Y = 1.164 * (src[y * 16 + x] - 16);
+      const double cb = src[256 + (y / 2) * 8 + x / 2] - 128.0, cr = src[320 + (y / 2) * 8 + x / 2] - 128.0;
+      const int r = std::clamp(roundHalfAway(Y + 1.596 * cr), 0, 255);
+      const int g = std::clamp(roundHalfAway(Y - 0.813 * cr - 0.391 * cb), 0, 255);
+      const int b = std::clamp(roundHalfAway(Y + 2.018 * cb), 0, 255);
+      uint32_t a = 0x80;
+      if (uint32_t(r) < th0 && uint32_t(g) < th0 && uint32_t(b) < th0)
+        a = 0;
+      else if (uint32_t(r) < th1 && uint32_t(g) < th1 && uint32_t(b) < th1)
+        a = 0x40;
+      px[y * 16 + x] = uint32_t(r) | uint32_t(g) << 8 | uint32_t(b) << 16 | a << 24;
+    }
+}
+}  // namespace mpeg2
+
+using namespace mpeg2;
+
+namespace {
 
 enum : uint32_t { kCmd = 0x10002000, kCtrl = 0x10002010, kBp = 0x10002020, kTop = 0x10002030,
                   kOutFifo = 0x10007000, kInFifo = 0x10007010 };
@@ -578,20 +587,7 @@ void Ipu::csc(uint32_t cmd) {
   need(384 * 8);
   const uint8_t* src = in_.data() + bit_ / 8;
   uint32_t px[256];
-  for (int y = 0; y < 16; ++y)
-    for (int x = 0; x < 16; ++x) {
-      const double Y = 1.164 * (src[y * 16 + x] - 16);
-      const double cb = src[256 + (y / 2) * 8 + x / 2] - 128.0, cr = src[320 + (y / 2) * 8 + x / 2] - 128.0;
-      const int r = std::clamp(roundHalfAway(Y + 1.596 * cr), 0, 255);
-      const int g = std::clamp(roundHalfAway(Y - 0.813 * cr - 0.391 * cb), 0, 255);
-      const int b = std::clamp(roundHalfAway(Y + 2.018 * cb), 0, 255);
-      uint32_t a = 0x80;
-      if (uint32_t(r) < th0_ && uint32_t(g) < th0_ && uint32_t(b) < th0_)
-        a = 0;
-      else if (uint32_t(r) < th1_ && uint32_t(g) < th1_ && uint32_t(b) < th1_)
-        a = 0x40;
-      px[y * 16 + x] = uint32_t(r) | uint32_t(g) << 8 | uint32_t(b) << 16 | a << 24;
-    }
+  cscMacroblock(src, px, th0_, th1_);
   bit_ += 384 * 8;
   if (rgb16) {
     uint16_t p16[256];

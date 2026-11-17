@@ -5,6 +5,8 @@
 #include <functional>
 
 namespace {
+// Yields with no interrupt between them before emulated time skips ahead (Kernel::yieldsSkipIdle).
+constexpr int kIdleYields = 32;
 constexpr uint32_t kExitStubPhys = 0x1000;           // kernel RAM, unused by the game
 constexpr uint32_t kExitStub = 0x80000000 | kExitStubPhys;
 constexpr uint32_t kUserSyscallReturnPhys = 0x1010;  // where SetSyscall handlers return to
@@ -55,6 +57,7 @@ uint32_t Kernel::arg(int reg) const { return static_cast<uint32_t>(cpu_.s.gpr[re
 void Kernel::ret(uint32_t v) { cpu_.s.gpr[2].ud[0] = sx32(v); }
 bool Kernel::validThread(int id) const { return id > 0 && id < int(threads_.size()) && threads_[id].used; }
 bool Kernel::validSema(int id) const { return id > 0 && id < int(semas_.size()) && semas_[id].used; }
+bool Kernel::semaphoreFree(int id) const { return validSema(id) && semas_[size_t(id)].count > 0; }
 CpuState& Kernel::contextOf(int id) {
   if (id != current_) return threads_[id].ctx;
   return inInterrupt_ ? intFrame_ : cpu_.s;
@@ -132,8 +135,12 @@ void Kernel::poll() {
   const bool enabled = (status & 1) && (status & 0x10000) && !(status & 6);
   if (inInterrupt_ || !enabled || !(hw.pending() || (hw.dmacStat & hw.dmacMask))) return;
 
+  // Yields keep counting through the IOP's replies (SIF0, channel 5): a thread polling the IOP
+  // by RPC between yields is still only waiting (Kernel::yieldsSkipIdle).
+  bool otherInterrupt = false;
   for (int ch = 0; ch < 16; ++ch) {  // DMAC channel handlers (INTC cause 1 is routed here)
     if (!(hw.dmacStat & hw.dmacMask & (1u << ch))) continue;
+    if (ch != 5) otherInterrupt = true;
     hw.dmacStat &= ~(1u << ch);
     ++interrupts[Hardware::kDmac];
     for (const Handler& h : dmacHandlers)
@@ -141,6 +148,7 @@ void Kernel::poll() {
   }
   for (int cause = 0; cause < 15; ++cause) {
     if (!(hw.pending() & (1u << cause))) continue;
+    if (cause != Hardware::kDmac) otherInterrupt = true;
     hw.intcStat &= ~(1u << cause);  // the kernel acknowledges the cause before dispatching
     ++interrupts[cause];
     if (cause == Hardware::kVblankStart && vsyncFlag_) {
@@ -153,6 +161,7 @@ void Kernel::poll() {
     for (const Handler& h : intcHandlers)
       if (int(h.cause) == cause) intQueue_.push_back(h);
   }
+  if (otherInterrupt) yieldsWithoutInterrupt_ = 0;
   if (intQueue_.empty()) return;
   inInterrupt_ = true;
   intFrame_ = std::move(cpu_.s);
@@ -380,6 +389,10 @@ void Kernel::syscall() {
       }
       ret(a0);
       if (n == 0x2B) reschedule();
+      if (yieldsSkipIdle && ++yieldsWithoutInterrupt_ >= kIdleYields) {
+        yieldsWithoutInterrupt_ = 0;
+        if (const uint64_t next = mem_.hw.nextEvent(); next != Hardware::kNever) mem_.hw.cycles = std::max(mem_.hw.cycles, next);
+      }
       return;
     }
     case 0x2F:  // GetThreadId
